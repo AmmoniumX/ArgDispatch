@@ -1,6 +1,7 @@
 // Runtime tests. Negative compile tests live in compile_fail.sh.
 #include <cstdio>
 #include <limits>
+#include <memory>
 #include <print>
 #include <stdexcept>
 #include <string>
@@ -295,6 +296,22 @@ void test_lambda_dispatch() {
            "lambda rejects an unparsable argument");
   check_eq(run(dispatcher, {"prog", "mul", "6"}), argdispatch::exit_args,
            "lambda checks arity");
+}
+
+// A callable that only holds move-only state (no copy constructor) must still
+// be bindable and dispatchable through the same route storage that also
+// supports mutable lambdas -- both are exercised because a naive
+// implementation can support one only at the expense of the other.
+void test_move_only_capture() {
+  argdispatch::ArgDispatcher dispatcher;
+
+  static int result = -1;
+  dispatcher.literal("go").and_then<int>("n").executes(
+      [held = std::make_unique<int>(42)](int n) mutable { result = *held + n; });
+
+  check_eq(run(dispatcher, {"prog", "go", "5"}), argdispatch::exit_ok,
+           "move-only capturing lambda dispatches");
+  check_eq(result, 47, "move-only capturing lambda ran with captured state");
 }
 
 void test_lambda_usage_text() {
@@ -620,6 +637,7 @@ int main() {
   test_dispatch();
   test_reflected_lambda_signatures();
   test_lambda_dispatch();
+  test_move_only_capture();
   test_lambda_usage_text();
   test_literal_branching();
   test_same_name_different_arity();
