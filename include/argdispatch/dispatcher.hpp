@@ -54,7 +54,8 @@ class ArgDispatcher {
     std::vector<Segment> pattern;
     std::string usage;
     std::size_t literal_count;
-    std::move_only_function<int(std::span<const std::string_view>) const> invoke;
+    std::move_only_function<int(std::span<const std::string_view>) const>
+        invoke;
   };
 
   std::vector<Route> routes_;
@@ -170,11 +171,11 @@ public:
         if (!usage.empty())
           usage += ' ';
         if (segment.is_argument) {
-          usage += '<';
-          usage += segment.text.empty() ? "arg" : segment.text;
-          usage += ':';
-          usage += types[argument++];
-          usage += '>';
+          if (!segment.text.empty()) {
+            usage += std::format("<{}:{}>", segment.text, types[argument++]);
+          } else {
+            usage += std::format("<{}>", types[argument++]);
+          }
         } else {
           usage += segment.text;
         }

@@ -56,8 +56,10 @@ void run(Mode mode, int n) {
 int main(int argc, char **argv) {
   argdispatch::ArgDispatcher dispatcher;
 
-  dispatcher.literal("get_gcd").and_then<int>("a").and_then<int>("b").executes(
-      gcd);
+  dispatcher.literal("get_gcd")
+      .and_then<int>() // unlabelled: shows up as <int>
+      .and_then<int>()
+      .executes(gcd);
 
   dispatcher.literal("greet")
       .and_then<std::string_view>("name")
@@ -67,17 +69,21 @@ int main(int argc, char **argv) {
 
   dispatcher.literal("run")
       .and_then<Mode>("mode")
-      .and_then<int>() // unlabelled: shows up as <arg:int>
+      .and_then<int>("n")
       .executes(run);
 
   // Lambdas work anywhere a function does. A captureless one, checked against
   // the chain exactly as a named function would be:
-  dispatcher.literal("mul").and_then<int>("x").and_then<int>("y").executes(
-      [](int x, int y) { return x * y; });
+  dispatcher.literal("mul")
+    .and_then<int>("x")
+    .and_then<int>("y")
+    .executes([](int x, int y) { return x * y; });
 
   // Capturing lambdas are fine too -- the closure is stored with the command.
   const std::string prefix = "[log]";
-  dispatcher.literal("shout").and_then<std::string_view>("message").executes(
+  dispatcher.literal("shout")
+    .and_then<std::string_view>("message")
+    .executes(
       [prefix](std::string_view message) {
         std::println("{} {}", prefix, message);
       });
