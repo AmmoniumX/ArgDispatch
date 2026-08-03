@@ -24,21 +24,40 @@ void device_info(std::string_view name) {
   std::println("device {}: up, 3 ports", name);
 }
 
-void device_increment(std::string_view name, int amount) {
-  std::println("device {}: counter += {}", name, amount);
+enum class Status { up, down };
+
+inline constexpr std::optional<const char *> status_to_str(Status e) {
+  switch (e) {
+  case Status::up:
+    return "up";
+  case Status::down:
+    return "down";
+  default:
+    return std::nullopt;
+  }
+}
+
+inline constexpr std::optional<Status> str_to_status(std::string_view sv) {
+  if (sv == "up")
+    return Status::up;
+  if (sv == "down")
+    return Status::down;
+  return std::nullopt;
+}
+
+void device_set_status(std::string_view name, Status status) {
+  std::println("device {} status changed: {}", name, *status_to_str(status));
 }
 
 void run(Mode mode, int n) {
   std::println("running mode={} n={}", argdispatch::enum_name(mode), n);
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   argdispatch::ArgDispatcher dispatcher;
 
-  dispatcher.literal("get_gcd")
-      .and_then<int>("a")
-      .and_then<int>("b")
-      .executes(gcd);
+  dispatcher.literal("get_gcd").and_then<int>("a").and_then<int>("b").executes(
+      gcd);
 
   dispatcher.literal("greet")
       .and_then<std::string_view>("name")
@@ -48,21 +67,18 @@ int main(int argc, char** argv) {
 
   dispatcher.literal("run")
       .and_then<Mode>("mode")
-      .and_then<int>()  // unlabelled: shows up as <arg:int>
+      .and_then<int>() // unlabelled: shows up as <arg:int>
       .executes(run);
 
   // Lambdas work anywhere a function does. A captureless one, checked against
   // the chain exactly as a named function would be:
-  dispatcher.literal("mul")
-      .and_then<int>("x")
-      .and_then<int>("y")
-      .executes([](int x, int y) { return x * y; });
+  dispatcher.literal("mul").and_then<int>("x").and_then<int>("y").executes(
+      [](int x, int y) { return x * y; });
 
   // Capturing lambdas are fine too -- the closure is stored with the command.
   const std::string prefix = "[log]";
-  dispatcher.literal("shout")
-      .and_then<std::string_view>("message")
-      .executes([prefix](std::string_view message) {
+  dispatcher.literal("shout").and_then<std::string_view>("message").executes(
+      [prefix](std::string_view message) {
         std::println("{} {}", prefix, message);
       });
 
@@ -81,10 +97,14 @@ int main(int argc, char** argv) {
 
   device.literal("info").executes(device_info);
 
-  device.literal("increment").and_then<int>("amount").executes(device_increment);
+  device.literal("set").and_then<Status>("status").executes(device_set_status);
+  device.literal("enable").executes(
+      [](auto name) { return device_set_status(name, Status::up); });
+  device.literal("disable").executes(
+      [](auto name) { return device_set_status(name, Status::down); });
 
-  // Branching does not need an extra literal: the same name with different arity works,
-  // because patterns of different lengths cannot be confused.
+  // Branching does not need an extra literal: the same name with different
+  // arity works, because patterns of different lengths cannot be confused.
   //   ./demo status
   //   ./demo status eth0
   auto status = dispatcher.literal("status");
