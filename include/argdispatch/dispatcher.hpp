@@ -22,6 +22,7 @@
 #include <format>
 #include <functional>
 #include <print>
+#include <ranges>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -276,10 +277,13 @@ public:
   // Match the tokens after the program name against the registered patterns and
   // run the best fit. Literal segments must match exactly; argument segments
   // each consume one token.
-  int dispatch(int argc, char **argv) const {
-    const char *program = argc > 0 ? argv[0] : "program";
-    const int first = argc > 0 ? 1 : 0;
-    const std::vector<std::string_view> tokens(argv + first, argv + argc);
+  int dispatch(std::span<const char *const> args) const {
+    const char *program = args.size() > 0 ? args[0] : "program";
+    const std::vector<std::string_view> tokens =
+        args.subspan(1) | std::views::transform([](const char *c) {
+          return std::string_view(c);
+        }) |
+        std::ranges::to<std::vector>();
 
     // Most literals wins, so a tagged branch beats a plainer pattern of the
     // same length. Registration order breaks ties.
@@ -331,6 +335,10 @@ public:
     std::println(stderr, "unknown command: {}", tokens.front());
     print_usage(program);
     return exit_usage;
+  }
+
+  int dispatch(int argc, char **argv) const {
+    return dispatch(std::span<char *>(argv, argc));
   }
 
   void print_usage(const char *program) const {

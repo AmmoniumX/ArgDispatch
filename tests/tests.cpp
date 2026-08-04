@@ -1,12 +1,13 @@
 // Runtime tests. Negative compile tests live in compile_fail.sh.
 #include <cstdio>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <print>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <argdispatch/argdispatch.hpp>
 
@@ -32,10 +33,9 @@ void check(bool ok, std::string_view what) {
 }
 
 // std::format has no formatter for enums, so render them via reflection.
-template <typename T>
-auto display(const T& value) {
+template <typename T> auto display(const T &value) {
   if constexpr (std::is_enum_v<T>) {
-    const char* name = argdispatch::enum_name(value);
+    const char *name = argdispatch::enum_name(value);
     return name != nullptr ? std::string(name)
                            : std::to_string(static_cast<long long>(value));
   } else {
@@ -44,7 +44,7 @@ auto display(const T& value) {
 }
 
 template <typename A, typename B>
-void check_eq(const A& got, const B& want, std::string_view what) {
+void check_eq(const A &got, const B &want, std::string_view what) {
   ++checks;
   if (!(got == want)) {
     ++failures;
@@ -57,9 +57,12 @@ void check_eq(const A& got, const B& want, std::string_view what) {
 
 void test_type_names() {
   check_eq(std::string(argdispatch::type_name<int>), "int", "type_name<int>");
-  check_eq(std::string(argdispatch::type_name<bool>), "bool", "type_name<bool>");
-  check_eq(std::string(argdispatch::type_name<double>), "double", "type_name<double>");
-  check_eq(std::string(argdispatch::type_name<Mode>), "Mode", "type_name<Mode>");
+  check_eq(std::string(argdispatch::type_name<bool>), "bool",
+           "type_name<bool>");
+  check_eq(std::string(argdispatch::type_name<double>), "double",
+           "type_name<double>");
+  check_eq(std::string(argdispatch::type_name<Mode>), "Mode",
+           "type_name<Mode>");
 
   // Overridden so help text does not spell out std::basic_string_view<char>, or
   // leak the libstdc++ ABI tag in std::__cxx11::basic_string<char>.
@@ -89,10 +92,13 @@ void test_enum_table() {
 }
 
 void test_enum_name() {
-  check_eq(std::string(argdispatch::enum_name(Mode::slow)), "slow", "enum_name slow");
+  check_eq(std::string(argdispatch::enum_name(Mode::slow)), "slow",
+           "enum_name slow");
   // Reverse lookup must not assume contiguous values.
-  check_eq(std::string(argdispatch::enum_name(Sparse::mid)), "mid", "enum_name sparse mid");
-  check_eq(std::string(argdispatch::enum_name(Sparse::hi)), "hi", "enum_name sparse hi");
+  check_eq(std::string(argdispatch::enum_name(Sparse::mid)), "mid",
+           "enum_name sparse mid");
+  check_eq(std::string(argdispatch::enum_name(Sparse::hi)), "hi",
+           "enum_name sparse hi");
   check(argdispatch::enum_name(static_cast<Mode>(99)) == nullptr,
         "enum_name of an unnamed value is nullptr");
 }
@@ -146,7 +152,8 @@ void test_parse_bool() {
 }
 
 void test_parse_strings() {
-  parses_to<std::string_view>("hello", std::string_view("hello"), "string_view");
+  parses_to<std::string_view>("hello", std::string_view("hello"),
+                              "string_view");
   parses_to<std::string>("hello", std::string("hello"), "string");
   // An empty string is a legitimate value for a string, unlike for a number.
   parses_to<std::string>("", std::string(""), "string accepts empty");
@@ -155,7 +162,7 @@ void test_parse_strings() {
 void test_parse_enums() {
   // Every enumerator must round-trip by name.
   constexpr auto table = argdispatch::enum_table<Mode>;
-  for (const auto& entry : table) {
+  for (const auto &entry : table) {
     Mode got{};
     check(argdispatch::parse_into(std::string_view(entry.name), got) &&
               static_cast<long long>(got) == entry.value,
@@ -176,7 +183,11 @@ void test_expected_of() {
 // ------------------------------------------------------------ dispatcher.hpp
 
 int last_a = 0, last_b = 0;
-int sum(int a, int b) { last_a = a; last_b = b; return a + b; }
+int sum(int a, int b) {
+  last_a = a;
+  last_b = b;
+  return a + b;
+}
 
 bool void_called = false;
 void note(std::string_view, bool) { void_called = true; }
@@ -185,9 +196,9 @@ Mode last_mode{};
 void take_mode(Mode m, int) { last_mode = m; }
 
 // Drive a dispatcher the way main() would, and report the exit code.
-int run(argdispatch::ArgDispatcher& dispatcher, std::vector<const char*> argv) {
-  return dispatcher.dispatch(static_cast<int>(argv.size()),
-                             const_cast<char**>(argv.data()));
+int run(argdispatch::ArgDispatcher &dispatcher,
+        std::initializer_list<const char *const> args) {
+  return dispatcher.dispatch(args);
 }
 
 void test_dispatch() {
@@ -197,29 +208,38 @@ void test_dispatch() {
       .and_then<std::string_view>("msg")
       .and_then<bool>("loud")
       .executes(note);
-  dispatcher.literal("mode").and_then<Mode>("m").and_then<int>().executes(take_mode);
+  dispatcher.literal("mode").and_then<Mode>("m").and_then<int>().executes(
+      take_mode);
 
-  check_eq(run(dispatcher, {"prog", "sum", "2", "5"}), argdispatch::exit_ok, "value-returning ok");
+  check_eq(run(dispatcher, {"prog", "sum", "2", "5"}), argdispatch::exit_ok,
+           "value-returning ok");
   check_eq(last_a, 2, "first argument forwarded");
   check_eq(last_b, 5, "second argument forwarded in order");
 
-  check_eq(run(dispatcher, {"prog", "note", "hi", "true"}), argdispatch::exit_ok, "void-returning ok");
+  check_eq(run(dispatcher, {"prog", "note", "hi", "true"}),
+           argdispatch::exit_ok, "void-returning ok");
   check(void_called, "void-returning target actually ran");
 
-  check_eq(run(dispatcher, {"prog", "mode", "turbo", "1"}), argdispatch::exit_ok, "enum argument ok");
+  check_eq(run(dispatcher, {"prog", "mode", "turbo", "1"}),
+           argdispatch::exit_ok, "enum argument ok");
   check(last_mode == Mode::turbo, "enum argument forwarded");
 
   // Arity.
-  check_eq(run(dispatcher, {"prog", "sum", "2"}), argdispatch::exit_args, "too few arguments");
-  check_eq(run(dispatcher, {"prog", "sum", "2", "5", "9"}), argdispatch::exit_args, "too many arguments");
+  check_eq(run(dispatcher, {"prog", "sum", "2"}), argdispatch::exit_args,
+           "too few arguments");
+  check_eq(run(dispatcher, {"prog", "sum", "2", "5", "9"}),
+           argdispatch::exit_args, "too many arguments");
 
   // Bad values.
-  check_eq(run(dispatcher, {"prog", "sum", "2", "xyz"}), argdispatch::exit_args, "unparsable argument");
-  check_eq(run(dispatcher, {"prog", "mode", "sideways", "1"}), argdispatch::exit_args, "unknown enumerator");
+  check_eq(run(dispatcher, {"prog", "sum", "2", "xyz"}), argdispatch::exit_args,
+           "unparsable argument");
+  check_eq(run(dispatcher, {"prog", "mode", "sideways", "1"}),
+           argdispatch::exit_args, "unknown enumerator");
 
   // Command resolution.
   check_eq(run(dispatcher, {"prog"}), argdispatch::exit_usage, "no command");
-  check_eq(run(dispatcher, {"prog", "nope"}), argdispatch::exit_usage, "unknown command");
+  check_eq(run(dispatcher, {"prog", "nope"}), argdispatch::exit_usage,
+           "unknown command");
 }
 
 // -------------------------------------------------------------- lambda targets
@@ -236,8 +256,9 @@ void test_reflected_lambda_signatures() {
   int captured = 7;
   auto capturing = [captured](std::string_view) { return captured; };
   static_assert(argdispatch::has_plain_call_operator<decltype(capturing)>);
-  static_assert(std::is_same_v<argdispatch::callable_args_t<decltype(capturing)>,
-                               std::tuple<std::string_view>>);
+  static_assert(
+      std::is_same_v<argdispatch::callable_args_t<decltype(capturing)>,
+                     std::tuple<std::string_view>>);
 
   // A generic lambda's operator() is a template, so it has no inspectable
   // parameters and falls back to the invocable check.
@@ -270,25 +291,33 @@ void test_lambda_dispatch() {
       [total = 0](int by) mutable { running_total = (total += by); });
 
   // Generic.
-  dispatcher.literal("add").and_then<double>("lhs").and_then<double>("rhs").executes(
-      [](auto lhs, auto rhs) { return lhs + rhs; });
+  dispatcher.literal("add")
+      .and_then<double>("lhs")
+      .and_then<double>("rhs")
+      .executes([](auto lhs, auto rhs) { return lhs + rhs; });
 
   // Void-returning with a side effect.
   static bool ran = false;
   dispatcher.literal("touch").and_then<bool>("flag").executes(
       [](bool flag) { ran = flag; });
 
-  check_eq(run(dispatcher, {"prog", "mul", "6", "7"}), argdispatch::exit_ok, "captureless lambda");
-  check_eq(run(dispatcher, {"prog", "offset", "5"}), argdispatch::exit_ok, "capturing lambda");
-  check_eq(run(dispatcher, {"prog", "add", "1.5", "2.25"}), argdispatch::exit_ok, "generic lambda");
+  check_eq(run(dispatcher, {"prog", "mul", "6", "7"}), argdispatch::exit_ok,
+           "captureless lambda");
+  check_eq(run(dispatcher, {"prog", "offset", "5"}), argdispatch::exit_ok,
+           "capturing lambda");
+  check_eq(run(dispatcher, {"prog", "add", "1.5", "2.25"}),
+           argdispatch::exit_ok, "generic lambda");
 
-  check_eq(run(dispatcher, {"prog", "touch", "true"}), argdispatch::exit_ok, "void lambda");
+  check_eq(run(dispatcher, {"prog", "touch", "true"}), argdispatch::exit_ok,
+           "void lambda");
   check(ran, "void lambda side effect happened");
 
   // Mutable closure state is retained between calls: 3, then 3+4.
-  check_eq(run(dispatcher, {"prog", "count", "3"}), argdispatch::exit_ok, "mutable lambda first call");
+  check_eq(run(dispatcher, {"prog", "count", "3"}), argdispatch::exit_ok,
+           "mutable lambda first call");
   check_eq(running_total, 3, "mutable lambda accumulated first call");
-  check_eq(run(dispatcher, {"prog", "count", "4"}), argdispatch::exit_ok, "mutable lambda second call");
+  check_eq(run(dispatcher, {"prog", "count", "4"}), argdispatch::exit_ok,
+           "mutable lambda second call");
   check_eq(running_total, 7, "mutable lambda state persisted across calls");
 
   // Lambdas get the same argument validation as functions.
@@ -307,7 +336,9 @@ void test_move_only_capture() {
 
   static int result = -1;
   dispatcher.literal("go").and_then<int>("n").executes(
-      [held = std::make_unique<int>(42)](int n) mutable { result = *held + n; });
+      [held = std::make_unique<int>(42)](int n) mutable {
+        result = *held + n;
+      });
 
   check_eq(run(dispatcher, {"prog", "go", "5"}), argdispatch::exit_ok,
            "move-only capturing lambda dispatches");
@@ -324,15 +355,20 @@ void test_lambda_usage_text() {
            "lambda-backed command still lists in usage");
 }
 
-// ------------------------------------------------ branching: literals and reuse
+// ------------------------------------ branching: literals and reuse
 
 std::string trace;
-void dev_info(std::string_view name) { trace = std::string("info:") + std::string(name); }
+void dev_info(std::string_view name) {
+  trace = std::string("info:") + std::string(name);
+}
 void dev_increment(std::string_view name, int amount) {
-  trace = std::string("inc:") + std::string(name) + ":" + std::to_string(amount);
+  trace =
+      std::string("inc:") + std::string(name) + ":" + std::to_string(amount);
 }
 void plain_info() { trace = "plain"; }
-void info_by_id(std::string_view id) { trace = std::string("byid:") + std::string(id); }
+void info_by_id(std::string_view id) {
+  trace = std::string("byid:") + std::string(id);
+}
 
 void test_literal_branching() {
   argdispatch::ArgDispatcher dispatcher;
@@ -344,17 +380,20 @@ void test_literal_branching() {
   device.literal("increment").and_then<int>("amount").executes(dev_increment);
 
   trace.clear();
-  check_eq(run(dispatcher, {"prog", "device", "eth0", "info"}), argdispatch::exit_ok, "literal branch info");
-  check_eq(trace, "info:eth0", "literal branch info forwarded the shared argument");
+  check_eq(run(dispatcher, {"prog", "device", "eth0", "info"}),
+           argdispatch::exit_ok, "literal branch info");
+  check_eq(trace, "info:eth0",
+           "literal branch info forwarded the shared argument");
 
   trace.clear();
   check_eq(run(dispatcher, {"prog", "device", "eth0", "increment", "5"}),
            argdispatch::exit_ok, "literal branch increment");
-  check_eq(trace, "inc:eth0:5", "literal branch increment forwarded both arguments");
+  check_eq(trace, "inc:eth0:5",
+           "literal branch increment forwarded both arguments");
 
   // A literal must match exactly; a wrong one is not taken as a value.
-  check_eq(run(dispatcher, {"prog", "device", "eth0", "bogus"}), argdispatch::exit_args,
-           "unknown literal is rejected");
+  check_eq(run(dispatcher, {"prog", "device", "eth0", "bogus"}),
+           argdispatch::exit_args, "unknown literal is rejected");
   // Argument errors past the literal still report normally.
   check_eq(run(dispatcher, {"prog", "device", "eth0", "increment", "xyz"}),
            argdispatch::exit_args, "bad argument after a literal");
@@ -371,11 +410,13 @@ void test_same_name_different_arity() {
   info.and_then<std::string_view>("id").executes(info_by_id);
 
   trace.clear();
-  check_eq(run(dispatcher, {"prog", "info"}), argdispatch::exit_ok, "zero-argument branch");
+  check_eq(run(dispatcher, {"prog", "info"}), argdispatch::exit_ok,
+           "zero-argument branch");
   check_eq(trace, "plain", "zero-argument branch ran");
 
   trace.clear();
-  check_eq(run(dispatcher, {"prog", "info", "abc"}), argdispatch::exit_ok, "one-argument branch");
+  check_eq(run(dispatcher, {"prog", "info", "abc"}), argdispatch::exit_ok,
+           "one-argument branch");
   check_eq(trace, "byid:abc", "one-argument branch ran");
 
   check_eq(run(dispatcher, {"prog", "info", "a", "b"}), argdispatch::exit_args,
@@ -395,10 +436,14 @@ void test_builder_is_reusable() {
   nested.and_then<int>("m").executes([](int, int) {});
   base.and_then<int>("m2").executes([](int, int) {});
 
-  check_eq(run(dispatcher, {"prog", "x", "1", "a"}), argdispatch::exit_ok, "reuse branch a");
-  check_eq(run(dispatcher, {"prog", "x", "1", "b"}), argdispatch::exit_ok, "reuse branch b");
-  check_eq(run(dispatcher, {"prog", "x", "1", "deep", "2"}), argdispatch::exit_ok, "reuse nested literal");
-  check_eq(run(dispatcher, {"prog", "x", "1", "2"}), argdispatch::exit_ok, "reuse plain continuation");
+  check_eq(run(dispatcher, {"prog", "x", "1", "a"}), argdispatch::exit_ok,
+           "reuse branch a");
+  check_eq(run(dispatcher, {"prog", "x", "1", "b"}), argdispatch::exit_ok,
+           "reuse branch b");
+  check_eq(run(dispatcher, {"prog", "x", "1", "deep", "2"}),
+           argdispatch::exit_ok, "reuse nested literal");
+  check_eq(run(dispatcher, {"prog", "x", "1", "2"}), argdispatch::exit_ok,
+           "reuse plain continuation");
 }
 
 void test_literal_beats_argument() {
@@ -412,11 +457,13 @@ void test_literal_beats_argument() {
   dispatcher.literal("x").literal("go").executes([] { which = "literal"; });
 
   which.clear();
-  check_eq(run(dispatcher, {"prog", "x", "go"}), argdispatch::exit_ok, "ambiguous length resolves");
+  check_eq(run(dispatcher, {"prog", "x", "go"}), argdispatch::exit_ok,
+           "ambiguous length resolves");
   check_eq(which, "literal", "more literals wins over a wildcard slot");
 
   which.clear();
-  check_eq(run(dispatcher, {"prog", "x", "other"}), argdispatch::exit_ok, "non-matching literal falls to the slot");
+  check_eq(run(dispatcher, {"prog", "x", "other"}), argdispatch::exit_ok,
+           "non-matching literal falls to the slot");
   check_eq(which, "argument", "argument slot still matches other values");
 }
 
@@ -428,9 +475,11 @@ void test_root_supports_literals() {
   root.literal("down").executes([](int) { got = "down"; });
 
   got.clear();
-  check_eq(run(dispatcher, {"prog", "3", "up"}), argdispatch::exit_ok, "root branch up");
+  check_eq(run(dispatcher, {"prog", "3", "up"}), argdispatch::exit_ok,
+           "root branch up");
   check_eq(got, "up", "root literal selected the right branch");
-  check_eq(run(dispatcher, {"prog", "3", "sideways"}), argdispatch::exit_args, "root unknown literal");
+  check_eq(run(dispatcher, {"prog", "3", "sideways"}), argdispatch::exit_args,
+           "root unknown literal");
 }
 
 void test_duplicate_pattern_rejected() {
@@ -441,7 +490,7 @@ void test_duplicate_pattern_rejected() {
     auto base = dispatcher.literal("d").and_then<int>("n");
     base.literal("go").executes([](int) {});
     base.literal("go").executes([](int) {});
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error &) {
     threw = true;
   }
   check(threw, "duplicate literal pattern is rejected");
@@ -452,7 +501,7 @@ void test_duplicate_pattern_rejected() {
     argdispatch::ArgDispatcher dispatcher;
     dispatcher.literal("d").and_then<int>("n").executes([](int) {});
     dispatcher.literal("d").and_then<double>("n").executes([](double) {});
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error &) {
     threw = true;
   }
   check(threw, "same shape with different argument types is rejected");
@@ -464,7 +513,7 @@ void test_duplicate_pattern_rejected() {
     auto base = dispatcher.literal("d");
     base.executes([] {});
     base.and_then<int>("n").executes([](int) {});
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error &) {
     threw = true;
   }
   check(!threw, "same name with different arity is allowed");
@@ -475,7 +524,7 @@ void test_empty_names_rejected() {
   try {
     argdispatch::ArgDispatcher dispatcher;
     dispatcher.literal("c").literal("").executes([] {});
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error &) {
     threw = true;
   }
   check(threw, "empty literal name is rejected");
@@ -484,7 +533,7 @@ void test_empty_names_rejected() {
   try {
     argdispatch::ArgDispatcher dispatcher;
     dispatcher.literal("").executes([] {});
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error &) {
     threw = true;
   }
   check(threw, "empty leading literal name is rejected");
@@ -493,27 +542,36 @@ void test_empty_names_rejected() {
 // ------------------------------------------------------- root (no-name) mode
 
 int last_w = 0, last_h = 0;
-void dims(int w, int h) { last_w = w; last_h = h; }
+void dims(int w, int h) {
+  last_w = w;
+  last_h = h;
+}
 
 void test_root_dispatch() {
   argdispatch::ArgDispatcher dispatcher;
   dispatcher.and_then<int>("width").and_then<int>("height").executes(dims);
 
   last_w = last_h = 0;
-  check_eq(run(dispatcher, {"prog", "12", "18"}), argdispatch::exit_ok, "root mode runs");
+  check_eq(run(dispatcher, {"prog", "12", "18"}), argdispatch::exit_ok,
+           "root mode runs");
   check_eq(last_w, 12, "root first argument");
   check_eq(last_h, 18, "root second argument");
 
   // The first token is an argument, not a command name -- nothing is skipped.
-  check_eq(run(dispatcher, {"prog", "3", "4"}), argdispatch::exit_ok, "root consumes argv[1]");
+  check_eq(run(dispatcher, {"prog", "3", "4"}), argdispatch::exit_ok,
+           "root consumes argv[1]");
   check_eq(last_w, 3, "root does not skip the first token");
 
-  check_eq(run(dispatcher, {"prog", "12"}), argdispatch::exit_args, "root too few arguments");
-  check_eq(run(dispatcher, {"prog", "1", "2", "3"}), argdispatch::exit_args, "root too many arguments");
-  check_eq(run(dispatcher, {"prog", "12", "xyz"}), argdispatch::exit_args, "root unparsable argument");
+  check_eq(run(dispatcher, {"prog", "12"}), argdispatch::exit_args,
+           "root too few arguments");
+  check_eq(run(dispatcher, {"prog", "1", "2", "3"}), argdispatch::exit_args,
+           "root too many arguments");
+  check_eq(run(dispatcher, {"prog", "12", "xyz"}), argdispatch::exit_args,
+           "root unparsable argument");
 
   // A bare invocation prints usage rather than an arity error.
-  check_eq(run(dispatcher, {"prog"}), argdispatch::exit_usage, "root with no arguments shows usage");
+  check_eq(run(dispatcher, {"prog"}), argdispatch::exit_usage,
+           "root with no arguments shows usage");
 }
 
 void test_root_zero_arity() {
@@ -523,9 +581,11 @@ void test_root_zero_arity() {
   argdispatch::ArgDispatcher dispatcher;
   dispatcher.executes([] { ran = true; });
 
-  check_eq(run(dispatcher, {"prog"}), argdispatch::exit_ok, "zero-arity root runs bare");
+  check_eq(run(dispatcher, {"prog"}), argdispatch::exit_ok,
+           "zero-arity root runs bare");
   check(ran, "zero-arity root actually ran");
-  check_eq(run(dispatcher, {"prog", "extra"}), argdispatch::exit_args, "zero-arity root rejects arguments");
+  check_eq(run(dispatcher, {"prog", "extra"}), argdispatch::exit_args,
+           "zero-arity root rejects arguments");
 }
 
 void test_root_accepts_lambdas() {
@@ -535,7 +595,8 @@ void test_root_accepts_lambdas() {
   dispatcher.and_then<int>("a").and_then<int>("b").executes(
       [bonus](int a, int b) { captured_sum = a + b + bonus; });
 
-  check_eq(run(dispatcher, {"prog", "2", "3"}), argdispatch::exit_ok, "root accepts a lambda");
+  check_eq(run(dispatcher, {"prog", "2", "3"}), argdispatch::exit_ok,
+           "root accepts a lambda");
   check_eq(captured_sum, 15, "root lambda captured state");
 }
 
@@ -547,7 +608,7 @@ void test_root_and_commands_are_exclusive() {
     argdispatch::ArgDispatcher dispatcher;
     dispatcher.and_then<int>().and_then<int>().executes(dims);
     dispatcher.literal("extra").and_then<int>().and_then<int>().executes(dims);
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error &) {
     threw = true;
   }
   check(threw, "a literal-led command after an argument-led one is rejected");
@@ -557,7 +618,7 @@ void test_root_and_commands_are_exclusive() {
     argdispatch::ArgDispatcher dispatcher;
     dispatcher.literal("extra").and_then<int>().and_then<int>().executes(dims);
     dispatcher.and_then<int>().and_then<int>().executes(dims);
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error &) {
     threw = true;
   }
   check(threw, "an argument-led command after a literal-led one is rejected");
@@ -567,7 +628,7 @@ void test_root_and_commands_are_exclusive() {
     argdispatch::ArgDispatcher dispatcher;
     dispatcher.and_then<int>().and_then<int>().executes(dims);
     dispatcher.and_then<int>().and_then<int>().executes(dims);
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error &) {
     threw = true;
   }
   check(threw, "a duplicate argument-led pattern is rejected");
@@ -580,21 +641,26 @@ void test_empty_pattern_coexists() {
   argdispatch::ArgDispatcher dispatcher;
   dispatcher.executes([] { got = "bare"; });
   dispatcher.literal("go").executes([] { got = "go"; });
-  dispatcher.literal("go").and_then<int>("n").executes([](int) { got = "go-n"; });
+  dispatcher.literal("go").and_then<int>("n").executes(
+      [](int) { got = "go-n"; });
 
   got.clear();
-  check_eq(run(dispatcher, {"prog"}), argdispatch::exit_ok, "bare invocation with commands present");
+  check_eq(run(dispatcher, {"prog"}), argdispatch::exit_ok,
+           "bare invocation with commands present");
   check_eq(got, "bare", "empty pattern ran on a bare invocation");
 
   got.clear();
-  check_eq(run(dispatcher, {"prog", "go"}), argdispatch::exit_ok, "literal alongside empty pattern");
+  check_eq(run(dispatcher, {"prog", "go"}), argdispatch::exit_ok,
+           "literal alongside empty pattern");
   check_eq(got, "go", "literal command still reachable");
 
   got.clear();
-  check_eq(run(dispatcher, {"prog", "go", "7"}), argdispatch::exit_ok, "literal with argument");
+  check_eq(run(dispatcher, {"prog", "go", "7"}), argdispatch::exit_ok,
+           "literal with argument");
   check_eq(got, "go-n", "longer literal pattern still reachable");
 
-  check_eq(run(dispatcher, {"prog", "nope"}), argdispatch::exit_usage, "unknown command still reported");
+  check_eq(run(dispatcher, {"prog", "nope"}), argdispatch::exit_usage,
+           "unknown command still reported");
 }
 
 void test_duplicate_command_rejected() {
@@ -603,7 +669,7 @@ void test_duplicate_command_rejected() {
     argdispatch::ArgDispatcher dispatcher;
     dispatcher.literal("dup").and_then<int>().and_then<int>().executes(dims);
     dispatcher.literal("dup").and_then<int>().and_then<int>().executes(dims);
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error &) {
     threw = true;
   }
   check(threw, "duplicate command names are rejected");
@@ -614,16 +680,17 @@ void test_arguments_are_positional() {
   dispatcher.literal("sum").and_then<int>("a").and_then<int>("b").executes(sum);
 
   last_a = last_b = 0;
-  check_eq(run(dispatcher, {"prog", "sum", "10", "3"}), argdispatch::exit_ok, "positional ok");
+  check_eq(run(dispatcher, {"prog", "sum", "10", "3"}), argdispatch::exit_ok,
+           "positional ok");
   check_eq(last_a, 10, "position decides, not label");
   check_eq(last_b, 3, "position decides, not label");
 
   // Labels are documentation only -- they must not be usable as flags.
-  check_eq(run(dispatcher, {"prog", "sum", "--a", "10"}), argdispatch::exit_args,
-           "labels are not flags");
+  check_eq(run(dispatcher, {"prog", "sum", "--a", "10"}),
+           argdispatch::exit_args, "labels are not flags");
 }
 
-}  // namespace
+} // namespace
 
 int main() {
   test_type_names();
