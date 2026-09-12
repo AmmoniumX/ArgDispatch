@@ -1,4 +1,4 @@
-// dispatcher.hpp -- the command builder and runtime dispatch.
+// dispatcher.hpp: the command builder and runtime dispatch.
 //
 // A command is a *pattern*: a sequence of segments, each either a literal token
 // or a typed argument slot. So
@@ -9,8 +9,8 @@
 // registers the pattern  [ "device" ] [ arg ] [ "increment" ] [ arg ]  which
 // matches  ./prog device eth0 increment 5  and calls f("eth0", 5).
 //
-// A command name and a branch point are the same thing -- a literal token that
-// must appear at that position -- so literal() covers both.
+// A command name and a branch point are the same thing: a literal token that
+// must appear at that position. literal() covers both.
 //
 // Builders are values: copyable, reusable, and safe to hold onto. Branching off
 // the same builder more than once is the point, so no method consumes it.
@@ -111,7 +111,7 @@ public:
           "and_then<> types do not match the function's parameter types");
 
       // Guarded so that a mismatched chain reports the assertions above and
-      // nothing else -- instantiating the body too would bury them in cascading
+      // nothing else: instantiating the body too would bury them in cascading
       // conversion errors.
       if constexpr (std::is_same_v<std::tuple<Ds...>, std::tuple<Args...>>) {
         bind(f);
@@ -125,9 +125,9 @@ public:
       requires std::is_class_v<F>
     void executes(F callable) const {
       if constexpr (has_plain_call_operator<F>) {
-        // A non-generic lambda's parameter types are recoverable by reflecting
-        // on its operator(), so it gets exactly the same checking a plain
-        // function gets -- no silent int-to-double style conversions.
+        // A non-generic lambda's parameter types are recoverable from its
+        // operator(), so it gets exactly the same checking a plain function
+        // gets: no silent int-to-double style conversions.
         static_assert(
             std::tuple_size_v<callable_args_t<F>> == sizeof...(Ds),
             "and_then<> chain length does not match the callable's arity");
@@ -198,8 +198,8 @@ public:
                 make_invoker(std::move(callable), argument_labels())});
     }
 
-    // The call operator must stay const -- Route::invoke is a const-qualified
-    // move_only_function, since dispatch() is const -- but `callable` need not
+    // The call operator must stay const: Route::invoke is a const-qualified
+    // move_only_function, since dispatch() is const, but `callable` need not
     // be: it may be a mutable lambda (non-const operator()) or hold move-only
     // captures. `callable` is declared mutable so the const operator() below
     // can still invoke a non-const-invocable callable.

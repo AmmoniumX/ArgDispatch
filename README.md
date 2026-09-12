@@ -1,7 +1,10 @@
 # ArgDispatch
 
-Dispatches command-line arguments straight to ordinary C++ functions, using C++26 static
-reflection. Commands are declared with a fluent builder.
+Dispatches command-line arguments straight to ordinary C++ functions. Commands are declared
+with a fluent builder. Type names and enum name/value tables are derived automatically, either
+from C++26 static reflection (`-freflection`) when it's available, or from the vendored
+[magic_enum](https://github.com/Neargye/magic_enum) when it isn't; C++23 alone is enough for
+everything else.
 
 ```cpp
 #include <argdispatch/argdispatch.hpp>
@@ -145,12 +148,19 @@ See `examples/direct.cpp` for the full program.
 
 ## Requirements
 
-g++ 16 or later, built with `-std=c++26 -freflection`. Developed against g++ 16.1.1.
-Clang does not yet implement reflection and cannot compile this.
+C++23 at minimum, on g++ 16 or later (developed against g++ 16.1.1). Clang cannot compile this
+yet, reflection or not, for unrelated reasons.
+
+Building with `-std=c++26 -freflection` derives `type_name` and `enum_table` from `<meta>`.
+Without it, `enum_table` falls back to the vendored `magic_enum` (`include/magic_enum/`), so an
+enum still works as an argument type with no extra step; only a non-enum type's display name
+needs a manual `type_name` specialization to read as anything other than the generic fallback.
+See below.
 
 ```console
-make          # builds build/demo and build/direct
-make test     # runtime tests + negative compile tests
+make                # builds build/demo and build/direct with reflection enabled
+make test           # runtime tests + negative compile tests, with reflection enabled
+make test-noreflect # the same tests, built for plain C++23 with reflection disabled
 ```
 
 ## Design
@@ -193,8 +203,9 @@ dispatcher.literal("add")
 ```
 
 Non-generic lambdas are checked **exactly** as strictly as named functions, because their
-parameter types are recovered by reflecting on the closure's `operator()`. That matters since 
-an `is_invocable` check would quietly accept a silent conversion:
+parameter types are recovered from the closure's `operator()` (no reflection needed for this, 
+it's an ordinary member function, deduced like any pointer-to-member-function). That matters
+since an `is_invocable` check would quietly accept a silent conversion:
 
 ```cpp
 dispatcher.literal("g").and_then<int>().executes([](double) { return 0; });
@@ -211,17 +222,20 @@ command, so a `mutable` counter accumulates across invocations.
 whole token required to be consumed, so `12abc` is rejected), `bool` (`true`/`false`/`1`/`0`),
 `std::string`, `std::string_view`, and any enum.
 
-**Type names in help text come from reflection**, but they can be specialized. `std::string_view` 
-and `std::string` are overridden to read `string`. 
+**Type names in help text are derived automatically for enums**, and can always be specialized.
+With `-freflection`, every type gets a display name automatically; `std::string_view` and
+`std::string` are overridden to read `string`. Without it, an enum still gets its name from
+`magic_enum`, but a non-enum type falls back to the generic `value` unless named explicitly.
 
-Specialise `type_name` to do the same for your own types:
+Specialise `type_name` to name your own non-enum types, with or without reflection:
 
 ```cpp
 template <>
 inline constexpr const char* argdispatch::type_name<MyType> = "my-type";
 ```
 
-**Enums parse by name**, and list their alternatives on failure:
+**Enums parse by name**, and list their alternatives on failure, with no registration step
+either way. An ordinary `enum class` is all that's needed:
 
 ```cpp
 enum class Mode { fast, slow, turbo };
@@ -232,6 +246,13 @@ dispatcher.literal("run").and_then<Mode>("mode").and_then<int>().executes(run);
 $ ./demo run sideways 3
 error: cannot parse 'sideways' for <mode>, expected one of {fast, slow, turbo}
 ```
+
+With `-freflection`, an enum's enumerators are discovered via `<meta>` the first time it's used.
+Without it, they come from `magic_enum` instead, which recovers them from compiler-specific name
+mangling rather than reflection: see `include/magic_enum/`. That comes with `magic_enum`'s own
+limit: only values within its scanned range are found (by default roughly `[-128, 127]`); widen
+it for an enum outside that range with a `magic_enum::customize::enum_range` specialization, see
+magic_enum's own documentation.
 
 Exit codes: `0` success, `1` no command or unknown command, `2` wrong arity or an
 unparsable argument.
@@ -244,6 +265,7 @@ include/argdispatch/
   reflect.hpp          type_name, enum_table, enum_name
   parse.hpp            parse_into, expected_of
   dispatcher.hpp       ArgDispatcher, Builder, dispatch
+include/magic_enum/    vendored enum reflection, used without -freflection
 examples/              examples directory
 tests/                 tests directory
 ```

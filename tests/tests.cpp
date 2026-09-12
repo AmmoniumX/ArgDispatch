@@ -48,7 +48,7 @@ void check_eq(const A &got, const B &want, std::string_view what) {
   ++checks;
   if (!(got == want)) {
     ++failures;
-    std::println(stderr, "FAIL: {} -- got '{}', want '{}'", what, display(got),
+    std::println(stderr, "FAIL: {} - got '{}', want '{}'", what, display(got),
                  display(want));
   }
 }
@@ -61,6 +61,8 @@ void test_type_names() {
            "type_name<bool>");
   check_eq(std::string(argdispatch::type_name<double>), "double",
            "type_name<double>");
+  // Derived automatically either way: via reflection, or via magic_enum -
+  // see reflect.hpp.
   check_eq(std::string(argdispatch::type_name<Mode>), "Mode",
            "type_name<Mode>");
 
@@ -111,10 +113,10 @@ void parses_to(std::string_view text, T want, std::string_view what) {
   ++checks;
   if (!argdispatch::parse_into(text, got)) {
     ++failures;
-    std::println(stderr, "FAIL: {} -- '{}' failed to parse", what, text);
+    std::println(stderr, "FAIL: {} - '{}' failed to parse", what, text);
   } else if (!(got == want)) {
     ++failures;
-    std::println(stderr, "FAIL: {} -- '{}' gave '{}', want '{}'", what, text,
+    std::println(stderr, "FAIL: {} - '{}' gave '{}', want '{}'", what, text,
                  display(got), display(want));
   }
 }
@@ -131,7 +133,7 @@ void test_parse_numbers() {
   parses_to<int>("0", 0, "int zero");
   parses_to<double>("2.5", 2.5, "double");
 
-  // The whole token must be consumed -- this is the bug where "12abc" silently
+  // The whole token must be consumed, so that "12abc" does not silently
   // becomes 12.
   rejects<int>("12abc", "int rejects trailing garbage");
   rejects<int>("abc", "int rejects non-numeric");
@@ -245,8 +247,9 @@ void test_dispatch() {
 // -------------------------------------------------------------- lambda targets
 
 void test_reflected_lambda_signatures() {
-  // Reflection recovers a non-generic lambda's exact parameter types, which is
-  // what lets lambdas be type-checked as strictly as named functions.
+  // A non-generic lambda's operator() is deduced like any pointer-to-member
+  // function (recovering its exact parameter types), which is what lets
+  // lambdas be type-checked as strictly as named functions.
   auto typed = [](int, double) { return 0; };
   static_assert(argdispatch::has_plain_call_operator<decltype(typed)>);
   static_assert(std::is_same_v<argdispatch::callable_args_t<decltype(typed)>,
@@ -265,10 +268,10 @@ void test_reflected_lambda_signatures() {
   auto generic = [](auto, auto) { return 0; };
   static_assert(!argdispatch::has_plain_call_operator<decltype(generic)>);
 
-  // Plain functions are not class types and never take the reflection path.
+  // Plain functions are not class types and never take this path.
   static_assert(!argdispatch::has_plain_call_operator<decltype(&sum)>);
 
-  check(true, "lambda signature reflection (compile-time)");
+  check(true, "lambda signature introspection (compile-time)");
 }
 
 void test_lambda_dispatch() {
@@ -329,7 +332,7 @@ void test_lambda_dispatch() {
 
 // A callable that only holds move-only state (no copy constructor) must still
 // be bindable and dispatchable through the same route storage that also
-// supports mutable lambdas -- both are exercised because a naive
+// supports mutable lambdas: both are exercised because a naive
 // implementation can support one only at the expense of the other.
 void test_move_only_capture() {
   argdispatch::ArgDispatcher dispatcher;
@@ -373,7 +376,7 @@ void info_by_id(std::string_view id) {
 void test_literal_branching() {
   argdispatch::ArgDispatcher dispatcher;
 
-  // One builder held as a value, branched twice -- the shared prefix is
+  // One builder held as a value, branched twice: the shared prefix is
   // declared once and reused.
   auto device = dispatcher.literal("device").and_then<std::string_view>("name");
   device.literal("info").executes(dev_info);
@@ -557,7 +560,7 @@ void test_root_dispatch() {
   check_eq(last_w, 12, "root first argument");
   check_eq(last_h, 18, "root second argument");
 
-  // The first token is an argument, not a command name -- nothing is skipped.
+  // The first token is an argument, not a command name: nothing is skipped.
   check_eq(run(dispatcher, {"prog", "3", "4"}), argdispatch::exit_ok,
            "root consumes argv[1]");
   check_eq(last_w, 3, "root does not skip the first token");
@@ -685,7 +688,7 @@ void test_arguments_are_positional() {
   check_eq(last_a, 10, "position decides, not label");
   check_eq(last_b, 3, "position decides, not label");
 
-  // Labels are documentation only -- they must not be usable as flags.
+  // Labels are documentation only: they must not be usable as flags.
   check_eq(run(dispatcher, {"prog", "sum", "--a", "10"}),
            argdispatch::exit_args, "labels are not flags");
 }

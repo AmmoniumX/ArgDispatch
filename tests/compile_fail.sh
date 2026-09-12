@@ -34,10 +34,10 @@ EOF
 
   if (cd "$root" && $CXX $CXXFLAGS -c "$tmp/case.cpp" -o /dev/null) \
       > "$tmp/out.txt" 2>&1; then
-    echo "FAIL: $name -- compiled, but should not have"
+    echo "FAIL: $name - compiled, but should not have"
     fails=$((fails + 1))
   elif ! grep -qF "$want" "$tmp/out.txt"; then
-    echo "FAIL: $name -- failed without the expected message"
+    echo "FAIL: $name - failed without the expected message"
     echo "  wanted: $want"
     echo "  got:"
     sed 's/^/    /' "$tmp/out.txt" | head -5

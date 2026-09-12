@@ -3,8 +3,8 @@
 //   $ ./direct 12 18 turbo
 //
 // Start the chain with and_then<> instead of literal(): the first token is an
-// argument rather than a command name. Everything else -- reflected type names,
-// enum parsing, lambda targets -- works identically.
+// argument rather than a command name. Everything else works identically (type
+// names, enum parsing, lambda targets).
 #include <print>
 #include <string_view>
 
@@ -17,7 +17,7 @@ void report(int width, int height, Mode mode) {
                argdispatch::enum_name(mode));
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   argdispatch::ArgDispatcher dispatcher;
 
   dispatcher.and_then<int>("width")

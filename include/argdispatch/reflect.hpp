@@ -1,25 +1,46 @@
-// reflect.hpp -- the C++26 static-reflection layer.
+// reflect.hpp: type display names, enum name/value tables, and callable
+// introspection.
 //
-// Two jobs live here, and only two:
-//   * type_name<T>  -- a human-readable spelling of any type, for help/error
-//   text
-//   * enum_table<E> -- an enumerator name/value table, so enums parse by name
+// Three jobs live here:
+//   * type_name<T>    - a human-readable spelling of any type, for help/error
+//                        text
+//   * enum_table<E>   - an enumerator name/value table, so enums parse by
+//                        name
+//   * callable_args_t<F> / has_plain_call_operator<F> - the parameter types
+//                        of a non-generic callable's operator(), recovered
+//                        without knowing F's signature up front
 //
-// Both are computed at compile time and baked into static storage, because the
-// std::meta query functions return std::vector<info>, which cannot escape a
-// constant-evaluated context. define_static_string/define_static_array are what
-// carry the results across into runtime-usable form.
+// With C++26 static reflection (`<meta>`, `-freflection`) type_name and
+// enum_table are derived automatically for any type or enum. Without it,
+// enum_table falls back to magic_enum (vendored under include/magic_enum/),
+// which derives the same enumerator name/value tables from compiler-specific
+// name mangling instead of static reflection, so no enum needs registering by
+// hand either way. Only a non-enum type's display name still needs a manual
+// type_name specialization to read as anything other than the generic
+// fallback. Callable introspection needs no reflection either way: a
+// non-generic callable's operator() is an ordinary member function, so its
+// parameter types come from deducing the type of `&F::operator()`.
 #ifndef ARGDISPATCH_REFLECT_HPP
 #define ARGDISPATCH_REFLECT_HPP
 
-#include <meta>
+#include <array>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
+
+#if defined(__cpp_impl_reflection)
+#define ARGDISPATCH_HAS_REFLECTION 1
+#include <meta>
 #include <vector>
+#else
+#define ARGDISPATCH_HAS_REFLECTION 0
+#include <magic_enum/magic_enum.hpp>
+#endif
 
 namespace argdispatch {
+
+#if ARGDISPATCH_HAS_REFLECTION
 
 // A displayable spelling of T, e.g. "int" or "Mode". Without reflection this
 // would need a hand-maintained trait specialised for every supported type.
@@ -34,6 +55,48 @@ constexpr const char *type_name =
 template <> inline constexpr const char *type_name<std::string_view> = "string";
 template <> inline constexpr const char *type_name<std::string> = "string";
 
+#else // !ARGDISPATCH_HAS_REFLECTION
+
+// Without reflection there is no way to spell an arbitrary type's name at
+// compile time. An enum gets its name from magic_enum automatically;
+// anything else falls back to "value" unless specialized. Specialize
+// type_name<T> to name your own non-enum types, the same way std::string
+// and std::string_view are named below.
+template <typename T>
+inline constexpr const char *type_name = [] {
+  if constexpr (std::is_enum_v<T>) {
+    return magic_enum::enum_type_name<T>().data();
+  } else {
+    return "value";
+  }
+}();
+
+template <> inline constexpr const char *type_name<bool> = "bool";
+template <> inline constexpr const char *type_name<char> = "char";
+template <> inline constexpr const char *type_name<signed char> = "signed char";
+template <>
+inline constexpr const char *type_name<unsigned char> = "unsigned char";
+template <> inline constexpr const char *type_name<short> = "short";
+template <>
+inline constexpr const char *type_name<unsigned short> = "unsigned short";
+template <> inline constexpr const char *type_name<int> = "int";
+template <>
+inline constexpr const char *type_name<unsigned int> = "unsigned int";
+template <> inline constexpr const char *type_name<long> = "long";
+template <>
+inline constexpr const char *type_name<unsigned long> = "unsigned long";
+template <> inline constexpr const char *type_name<long long> = "long long";
+template <>
+inline constexpr const char *type_name<unsigned long long> =
+    "unsigned long long";
+template <> inline constexpr const char *type_name<float> = "float";
+template <> inline constexpr const char *type_name<double> = "double";
+template <> inline constexpr const char *type_name<long double> = "long double";
+template <> inline constexpr const char *type_name<std::string_view> = "string";
+template <> inline constexpr const char *type_name<std::string> = "string";
+
+#endif // ARGDISPATCH_HAS_REFLECTION
+
 // One enumerator. Deliberately a plain aggregate of structural types: this gets
 // stored in a static array, and std::string_view is not a structural type, so
 // the name has to be a const char*.
@@ -41,6 +104,8 @@ struct EnumEntry {
   const char *name;
   long long value;
 };
+
+#if ARGDISPATCH_HAS_REFLECTION
 
 template <typename E>
   requires std::is_enum_v<E>
@@ -64,58 +129,27 @@ template <typename E>
   requires std::is_enum_v<E>
 constexpr auto enum_table = std::define_static_array(enum_entries<E>());
 
-// ---------------------------------------------------------------------------
-// Callable introspection.
-//
-// A function passed by value is unreachable as an entity -- parameters_of
-// throws on a function-pointer constant -- so plain functions are handled by
-// template deduction elsewhere. A lambda is different: its closure type is a
-// real class, so its operator() can be reflected on directly, and that gives
-// exact parameter types for lambdas that template deduction could never
-// recover.
+#else // !ARGDISPATCH_HAS_REFLECTION
 
-// The reflection of a closure's non-template operator(), or an null info if it
-// has none. A *generic* lambda's operator() is a function template rather than
-// a function, so it is deliberately not matched here.
-consteval std::meta::info plain_call_operator_of(std::meta::info closure) {
-  for (auto member :
-       std::meta::members_of(closure, std::meta::access_context::current())) {
-    if (std::meta::is_function(member) &&
-        std::meta::is_operator_function(member) &&
-        std::meta::operator_of(member) ==
-            std::meta::operators::op_parentheses) {
-      return member;
-    }
+// Without reflection, magic_enum recovers E's enumerators from
+// compiler-specific name mangling instead of std::meta, so no enum needs
+// registering by hand. That comes with magic_enum's own limit: only values in
+// its scanned range are found (by default roughly [-128, 127]; widen it with
+// a customize::enum_range<E> specialization for an enum outside that range,
+// see magic_enum's own documentation).
+template <typename E>
+  requires std::is_enum_v<E>
+constexpr auto enum_table = [] {
+  constexpr auto entries = magic_enum::enum_entries<E>();
+  std::array<EnumEntry, entries.size()> table{};
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    table[i] = EnumEntry{entries[i].second.data(),
+                         static_cast<long long>(entries[i].first)};
   }
-  return std::meta::info{};
-}
-
-// True when F has a non-template operator() whose parameters can be inspected.
-// False for generic lambdas and for plain functions/function pointers.
-template <typename F>
-constexpr bool has_plain_call_operator = [] consteval {
-  if constexpr (std::is_class_v<F>) {
-    return plain_call_operator_of(^^F) != std::meta::info{};
-  } else {
-    return false;
-  }
+  return table;
 }();
 
-consteval std::vector<std::meta::info>
-call_operator_params(std::meta::info closure) {
-  std::vector<std::meta::info> types;
-  for (auto param : std::meta::parameters_of(plain_call_operator_of(closure))) {
-    types.push_back(std::meta::type_of(param));
-  }
-  return types;
-}
-
-// The parameter types of F's operator(), as a std::tuple. Only valid when
-// has_plain_call_operator<F> is true.
-template <typename F>
-  requires has_plain_call_operator<F>
-using callable_args_t = [:std::meta::substitute(^^std::tuple,
-                                                call_operator_params(^^F)):];
+#endif // ARGDISPATCH_HAS_REFLECTION
 
 // Reverse lookup: the enumerator name for a value, or nullptr if the value does
 // not name one. Does not assume enumerators are contiguous or start at zero.
@@ -129,6 +163,44 @@ constexpr const char *enum_name(E value) {
   }
   return nullptr;
 }
+
+// ---------------------------------------------------------------------------
+// Callable introspection.
+//
+// A function passed by value is unreachable as an entity: a function
+// pointer alone does not carry parameter names or let you re-derive its
+// signature independently,  so plain functions are handled by template
+// deduction elsewhere. A lambda is different: a *non-generic* lambda's
+// operator() is an ordinary member function, so `&F::operator()` names it
+// and its type can be deduced like any other pointer-to-member-function,
+// recovering exact parameter types that template deduction on F alone could
+// never see. A *generic* lambda's operator() is a function template instead,
+// so forming `&F::operator()` without template arguments is ill-formed:
+// that failure is what tells the two apart below.
+
+template <typename R, typename C, typename... Args>
+std::tuple<Args...> call_operator_args(R (C::*)(Args...));
+template <typename R, typename C, typename... Args>
+std::tuple<Args...> call_operator_args(R (C::*)(Args...) const);
+template <typename R, typename C, typename... Args>
+std::tuple<Args...> call_operator_args(R (C::*)(Args...) noexcept);
+template <typename R, typename C, typename... Args>
+std::tuple<Args...> call_operator_args(R (C::*)(Args...) const noexcept);
+
+// True when F has a non-template operator() whose parameters can be inspected.
+// False for generic lambdas and for plain functions/function pointers.
+template <typename F, typename = void>
+inline constexpr bool has_plain_call_operator = false;
+
+template <typename F>
+inline constexpr bool
+    has_plain_call_operator<F, std::void_t<decltype(&F::operator())>> = true;
+
+// The parameter types of F's operator(), as a std::tuple. Only valid when
+// has_plain_call_operator<F> is true.
+template <typename F>
+  requires has_plain_call_operator<F>
+using callable_args_t = decltype(call_operator_args(&F::operator()));
 
 } // namespace argdispatch
 

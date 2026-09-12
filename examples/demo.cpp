@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
       [](int x, int y) { return x * y; }
     );
 
-  // Capturing lambdas are fine too -- the closure is stored with the command.
+  // Capturing lambdas are fine too - the closure is stored with the command.
   const std::string prefix = "[log]";
   dispatcher.literal("shout")
     .and_then<std::string_view>("message")
@@ -92,7 +92,7 @@ int main(int argc, char **argv) {
     .executes([](auto lhs, auto rhs) { return lhs + rhs; });
 
   // Branching. The builder is a value, so a shared prefix can be declared once
-  // and fanned out with literal() -- here `device <name>` is common to both:
+  // and fanned out with literal() - here `device <name>` is common to both:
   //   ./demo device eth0 info
   //   ./demo device eth0 increment 5
   auto device = dispatcher.literal("device")
