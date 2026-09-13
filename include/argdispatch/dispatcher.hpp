@@ -459,10 +459,7 @@ public:
 
     auto ss = std::ostringstream{};
 
-    ss << header_line(program);
-    if (description_) {
-      ss << "\n\n";
-    }
+    ss << header_line(program) << "\n\n";
 
     // Format the usage text
 
