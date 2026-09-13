@@ -149,5 +149,7 @@ int main(int argc, char **argv) {
     );
   // clang-format on
 
-  return dispatcher.build().dispatch(argc, argv);
+  const auto d = std::move(dispatcher).build();
+
+  return d.dispatch(argc, argv);
 }

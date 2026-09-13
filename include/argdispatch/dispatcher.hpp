@@ -425,9 +425,19 @@ public:
 
   // Called once after all commands have been registered, to add the built-in
   // "--help" and "--version" commands
-  // Returns a const reference, to imply that no more commands should be
-  // registered after this point.
-  const auto &build() {
+  // Returns a const copy from moved-from self, to express that
+  // no more commands can be registered after this point.
+  // This is the "preferred" overload to build(), but calling it on a
+  // non-moved-from dispatcher is also valid.
+  const auto build() && {
+    autoregister_builtin_commands();
+    return std::move(*this);
+  }
+
+  // Same as above, but not moved-from, so only returns a const ref
+  // The constness here is only for expressive purposes, since
+  // the dispatcher is still mutable from the previous references
+  const auto &build() & {
     autoregister_builtin_commands();
     return *this;
   }

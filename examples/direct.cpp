@@ -31,5 +31,7 @@ int main(int argc, char **argv) {
       .and_then<Mode>("mode")
       .executes(report);
 
-  return dispatcher.build().dispatch(argc, argv);
+  const auto d = std::move(dispatcher).build();
+
+  return d.dispatch(argc, argv);
 }
