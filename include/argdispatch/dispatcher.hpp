@@ -1117,11 +1117,22 @@ typeset -gA @PREFIX@_edge_child @PREFIX@_arg_child
   done
 
   local -a words_out descs
+  local desc
   for e in "${(k)@PREFIX@_edge_parent[@]}"; do
     if [[ "${@PREFIX@_edge_parent[$e]}" == "$node" ]]; then
       for n in ${=@PREFIX@_edge_names[$e]}; do
         words_out+=("$n")
-        descs+=("${@PREFIX@_edge_desc[$e]:-$n}")
+        desc="${@PREFIX@_edge_desc[$e]:-}"
+        # compadd's -d array replaces each match's listing with the
+        # corresponding display string rather than showing it alongside the
+        # match, so the display string has to spell out the match itself too
+        # or the list would show only descriptions with no visible link back
+        # to the flag each one belongs to.
+        if [[ -n "$desc" ]]; then
+          descs+=("$n -- $desc")
+        else
+          descs+=("$n")
+        fi
       done
     fi
   done
