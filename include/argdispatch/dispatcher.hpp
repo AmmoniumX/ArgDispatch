@@ -32,6 +32,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "parse.hpp"
@@ -48,12 +49,47 @@ inline constexpr int exit_ok = 0;
 inline constexpr int exit_usage = 1; // nothing to run, or an unknown command
 inline constexpr int exit_args = 2;  // wrong shape, or an unparsable argument
 
-// One element of a command pattern.
+// One element of a command pattern: either a typed argument slot, or a
+// literal token (possibly with aliases, any of which may appear at that
+// position).
 struct Segment {
-  bool is_argument;
-  // For a literal, the token that must appear. For an argument, its display
-  // label, which may be empty.
-  std::string text;
+  struct Argument {
+    // Display label, which may be empty.
+    std::string label;
+  };
+  struct Literal {
+    // At least one name; later ones are aliases for the first.
+    std::vector<std::string> names;
+
+    // "name1|name2|..." for usage/help text.
+    std::string display() const {
+      std::string result;
+      for (std::size_t i = 0; i < names.size(); ++i) {
+        if (i != 0)
+          result += '|';
+        result += names[i];
+      }
+      return result;
+    }
+
+    // True if `token` is this literal or one of its aliases.
+    bool matches(std::string_view token) const {
+      for (const auto &name : names) {
+        if (name == token)
+          return true;
+      }
+      return false;
+    }
+  };
+
+  std::variant<Argument, Literal> data;
+
+  bool is_argument() const noexcept {
+    return std::holds_alternative<Argument>(data);
+  }
+  bool is_literal() const noexcept {
+    return std::holds_alternative<Literal>(data);
+  }
 };
 
 class ArgDispatcher {
@@ -133,7 +169,7 @@ public:
     template <typename T>
     Builder<Ds..., T> and_then(const char *label = nullptr) const {
       std::vector<Segment> next = pattern_;
-      next.push_back(Segment{true, label != nullptr ? label : ""});
+      next.push_back(Segment{Segment::Argument{label != nullptr ? label : ""}});
       return Builder<Ds..., T>(dispatcher_, std::move(next));
     }
 
@@ -141,12 +177,26 @@ public:
     // to branch: several literals after a shared prefix fan it out into
     // separate commands.
     Builder literal(std::string name) const {
-      if (name.empty()) {
+      return literal({std::move(name)});
+    }
+
+    // Same as above, but any of "names" may appear at this position: they are
+    // aliases for the same command. At least one name is required, and none
+    // may be empty.
+    Builder literal(std::initializer_list<std::string> names) const {
+      if (names.size() == 0) {
         throw std::logic_error(
-            "argdispatch: literal() requires a non-empty name");
+            "argdispatch: literal() requires at least one name");
+      }
+      std::vector<std::string> names_vec(names);
+      for (const auto &name : names_vec) {
+        if (name.empty()) {
+          throw std::logic_error(
+              "argdispatch: literal() requires non-empty names");
+        }
       }
       std::vector<Segment> next = pattern_;
-      next.push_back(Segment{false, std::move(name)});
+      next.push_back(Segment{Segment::Literal{std::move(names_vec)}});
       return Builder(dispatcher_, std::move(next));
     }
 
@@ -239,8 +289,9 @@ public:
     std::vector<std::string> argument_labels() const {
       std::vector<std::string> labels;
       for (const auto &segment : pattern_) {
-        if (segment.is_argument) {
-          labels.push_back(segment.text.empty() ? "arg" : segment.text);
+        if (segment.is_argument()) {
+          const auto &label = std::get<Segment::Argument>(segment.data).label;
+          labels.push_back(label.empty() ? "arg" : label);
         }
       }
       return labels;
@@ -248,20 +299,26 @@ public:
 
     // "device <name:std::string_view> increment <amount:int>"
     std::string build_usage() const {
-      const std::array<const char *, sizeof...(Ds)> types{type_name<Ds>...};
+      const std::array<TypeNameMeta, sizeof...(Ds)> types{type_name<Ds>...};
       std::string usage;
       std::size_t argument = 0;
       for (const auto &segment : pattern_) {
         if (!usage.empty())
           usage += ' ';
-        if (segment.is_argument) {
-          if (!segment.text.empty()) {
-            usage += std::format("<{}:{}>", segment.text, types[argument++]);
+        if (segment.is_argument()) {
+          const auto &label = std::get<Segment::Argument>(segment.data).label;
+          if (!label.empty()) {
+            if (types[argument].show) {
+              usage += std::format("<{}:{}>", label, types[argument].name);
+            } else {
+              usage += std::format("<{}>", label);
+            }
+            ++argument;
           } else {
-            usage += std::format("<{}>", types[argument++]);
+            usage += std::format("<{}>", types[argument++].name);
           }
         } else {
-          usage += segment.text;
+          usage += std::get<Segment::Literal>(segment.data).display();
         }
       }
       return usage;
@@ -274,7 +331,7 @@ public:
               std::optional<std::string> description = std::nullopt) const {
       std::size_t literals = 0;
       for (const auto &segment : pattern_) {
-        if (!segment.is_argument)
+        if (!segment.is_argument())
           ++literals;
       }
 
@@ -348,6 +405,12 @@ public:
     return root().literal(std::move(name));
   }
 
+  // Same as above, but any of "names" may appear as the leading token: they
+  // are aliases for the same command.
+  Builder<> literal(std::initializer_list<std::string> names) {
+    return root().literal(names);
+  }
+
   // Begin a command whose first token is an argument. Mutually exclusive with
   // literal-led commands.
   template <typename T> Builder<T> and_then(const char *label = nullptr) {
@@ -414,7 +477,8 @@ public:
     bool named = false;
     for (const auto &route : routes_) {
       if (leads_with_literal(route.pattern) &&
-          route.pattern.front().text == tokens.front()) {
+          std::get<Segment::Literal>(route.pattern.front().data)
+              .matches(tokens.front())) {
         if (!named) {
           std::println(stderr, "error: invalid arguments for '{}'",
                        tokens.front());
@@ -546,7 +610,7 @@ private:
       std::string name, std::string description,
       std::move_only_function<int(std::span<const std::string_view>) const>
           invoke) {
-    std::vector<Segment> pattern{Segment{false, name}};
+    std::vector<Segment> pattern{Segment{Segment::Literal{{name}}}};
     for (const auto &existing : routes_) {
       if (same_shape(existing.pattern, pattern))
         return;
@@ -569,7 +633,7 @@ private:
   }
 
   static bool leads_with_literal(const std::vector<Segment> &pattern) {
-    return !pattern.empty() && !pattern.front().is_argument;
+    return !pattern.empty() && pattern.front().is_literal();
   }
 
   bool has_literal_commands() const {
@@ -585,7 +649,9 @@ private:
     if (route.pattern.size() != tokens.size())
       return false;
     for (std::size_t i = 0; i < tokens.size(); ++i) {
-      if (!route.pattern[i].is_argument && route.pattern[i].text != tokens[i]) {
+      const auto &segment = route.pattern[i];
+      if (segment.is_literal() &&
+          !std::get<Segment::Literal>(segment.data).matches(tokens[i])) {
         return false;
       }
     }
@@ -596,24 +662,36 @@ private:
   arguments_of(const Route &route, std::span<const std::string_view> tokens) {
     std::vector<std::string_view> args;
     for (std::size_t i = 0; i < tokens.size(); ++i) {
-      if (route.pattern[i].is_argument)
+      if (route.pattern[i].is_argument())
         args.push_back(tokens[i]);
     }
     return args;
   }
 
-  // Two patterns collide when they have the same shape and the same literals:
-  // no input could tell them apart. Labels and argument types are not part of
-  // the comparison, because dispatch never sees them.
+  // Two patterns collide when no input could tell them apart: same shape,
+  // and, at every literal position, an alias in common (not necessarily the
+  // exact same alias set). Labels and argument types are not part of the
+  // comparison, because dispatch never sees them.
   static bool same_shape(const std::vector<Segment> &a,
                          const std::vector<Segment> &b) {
     if (a.size() != b.size())
       return false;
     for (std::size_t i = 0; i < a.size(); ++i) {
-      if (a[i].is_argument != b[i].is_argument)
+      if (a[i].is_argument() != b[i].is_argument())
         return false;
-      if (!a[i].is_argument && a[i].text != b[i].text)
-        return false;
+      if (a[i].is_literal()) {
+        const auto &la = std::get<Segment::Literal>(a[i].data);
+        const auto &lb = std::get<Segment::Literal>(b[i].data);
+        bool overlap = false;
+        for (const auto &name : la.names) {
+          if (lb.matches(name)) {
+            overlap = true;
+            break;
+          }
+        }
+        if (!overlap)
+          return false;
+      }
     }
     return true;
   }

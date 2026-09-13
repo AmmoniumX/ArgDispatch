@@ -56,21 +56,22 @@ void check_eq(const A &got, const B &want, std::string_view what) {
 // ---------------------------------------------------------------- reflect.hpp
 
 void test_type_names() {
-  check_eq(std::string(argdispatch::type_name<int>), "int", "type_name<int>");
-  check_eq(std::string(argdispatch::type_name<bool>), "bool",
+  check_eq(std::string(argdispatch::type_name<int>.name), "int",
+           "type_name<int>");
+  check_eq(std::string(argdispatch::type_name<bool>.name), "bool",
            "type_name<bool>");
-  check_eq(std::string(argdispatch::type_name<double>), "double",
+  check_eq(std::string(argdispatch::type_name<double>.name), "double",
            "type_name<double>");
   // Derived automatically either way: via reflection, or via magic_enum -
   // see reflect.hpp.
-  check_eq(std::string(argdispatch::type_name<Mode>), "Mode",
+  check_eq(std::string(argdispatch::type_name<Mode>.name), "Mode",
            "type_name<Mode>");
 
   // Overridden so help text does not spell out std::basic_string_view<char>, or
   // leak the libstdc++ ABI tag in std::__cxx11::basic_string<char>.
-  check_eq(std::string(argdispatch::type_name<std::string_view>), "string",
+  check_eq(std::string(argdispatch::type_name<std::string_view>.name), "string",
            "type_name<string_view> is friendly");
-  check_eq(std::string(argdispatch::type_name<std::string>), "string",
+  check_eq(std::string(argdispatch::type_name<std::string>.name), "string",
            "type_name<string> is friendly");
 
   // The override has to reach error text too, not just usage lines.

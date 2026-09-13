@@ -65,7 +65,7 @@ template <typename T> std::string expected_of() {
     s += "}";
     return s;
   } else {
-    return type_name<T>;
+    return type_name<T>.name;
   }
 }
 
