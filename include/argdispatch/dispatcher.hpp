@@ -94,13 +94,22 @@ struct Segment {
 };
 
 class ArgDispatcher {
+  // Ordinary routes carry User: dispatch() runs their invoke closure. The
+  // built-in "--help"/"--version" routes carry Help/Version instead of a
+  // closure, so dispatch() can call print_usage()/print_version() on
+  // *itself* directly rather than through a closure that would have had to
+  // capture a dispatcher pointer at registration time — a pointer that
+  // dangles the moment the dispatcher is later moved (e.g. by build() &&).
   struct Route {
+    enum class Kind { User, Help, Version };
+
     std::vector<Segment> pattern;
     std::string usage;
     std::size_t literal_count;
     std::optional<std::string> description;
     std::move_only_function<int(std::span<const std::string_view>) const>
         invoke;
+    Kind kind = Kind::User;
   };
 
   // Mutable: dispatch() is logically const from the caller's point of view,
@@ -111,9 +120,6 @@ class ArgDispatcher {
   std::optional<std::string> program_name_;
   std::optional<std::string> version_;
   std::optional<std::string> description_;
-  // The argv[0] passed to the current dispatch() call, for the built-in
-  // commands' invokers to format usage/version text with.
-  mutable const char *current_program_ = "program";
 
 public:
   struct Options {
@@ -447,7 +453,6 @@ public:
   // each consume one token.
   int dispatch(std::span<const char *const> args) const {
     const char *program = args.size() > 0 ? args[0] : "program";
-    current_program_ = program;
     const std::vector<std::string_view> tokens =
         args.subspan(1) | std::views::transform([](const char *c) {
           return std::string_view(c);
@@ -464,8 +469,18 @@ public:
         best = &route;
       }
     }
-    if (best != nullptr)
-      return best->invoke(arguments_of(*best, tokens));
+    if (best != nullptr) {
+      switch (best->kind) {
+      case Route::Kind::Help:
+        print_usage(program);
+        return exit_ok;
+      case Route::Kind::Version:
+        print_version(program);
+        return exit_ok;
+      case Route::Kind::User:
+        return best->invoke(arguments_of(*best, tokens));
+      }
+    }
 
     if (tokens.empty()) {
       print_usage(program);
@@ -588,22 +603,17 @@ public:
       if (route.description) {
         ss << std::format(" - {}", *route.description);
       }
+      ss << "\n";
     }
+    std::println("{}", ss.str());
   }
 
   // Registers "--help" and "--version" as ordinary routes
   auto &register_builtin_commands() {
-
     register_builtin_command("--help", "prints this help message",
-                             [this](std::span<const std::string_view>) {
-                               print_usage(current_program_);
-                               return exit_ok;
-                             });
+                             Route::Kind::Help);
     register_builtin_command("--version", "prints version information",
-                             [this](std::span<const std::string_view>) {
-                               print_version(current_program_);
-                               return exit_ok;
-                             });
+                             Route::Kind::Version);
     return *this;
   }
 
@@ -623,17 +633,16 @@ private:
     register_builtin_commands();
   }
 
-  void register_builtin_command(
-      std::string name, std::string description,
-      std::move_only_function<int(std::span<const std::string_view>) const>
-          invoke) {
+  void register_builtin_command(std::string name, std::string description,
+                                Route::Kind kind) {
     std::vector<Segment> pattern{Segment{Segment::Literal{{name}}}};
     for (const auto &existing : routes_) {
       if (same_shape(existing.pattern, pattern))
         return;
     }
     routes_.push_back(Route{std::move(pattern), name, /*literal_count=*/1,
-                            std::move(description), std::move(invoke)});
+                            std::move(description), /*invoke=*/nullptr,
+                            kind});
   }
 
   // "{program_name} {version (optional)} - {description (optional)}"
