@@ -603,9 +603,9 @@ void test_root_accepts_lambdas() {
   check_eq(captured_sum, 15, "root lambda captured state");
 }
 
-void test_root_and_commands_are_exclusive() {
-  // Mixing the two would make a leading token ambiguous, so it must be rejected
-  // rather than silently resolved one way.
+void test_root_and_literal_can_coexist() {
+  // A leading literal and a leading argument may now share a dispatcher.
+  // Neither registration throws...
   bool threw = false;
   try {
     argdispatch::ArgDispatcher dispatcher;
@@ -614,7 +614,7 @@ void test_root_and_commands_are_exclusive() {
   } catch (const std::logic_error &) {
     threw = true;
   }
-  check(threw, "a literal-led command after an argument-led one is rejected");
+  check(!threw, "a literal-led command after an argument-led one is allowed");
 
   threw = false;
   try {
@@ -624,13 +624,32 @@ void test_root_and_commands_are_exclusive() {
   } catch (const std::logic_error &) {
     threw = true;
   }
-  check(threw, "an argument-led command after a literal-led one is rejected");
+  check(!threw, "an argument-led command after a literal-led one is allowed");
 
+  // ...and when a token could go either way, the literal command wins.
+  static std::string got;
+  argdispatch::ArgDispatcher dispatcher;
+  dispatcher.literal("go").executes([] { got = "go"; });
+  dispatcher.and_then<std::string_view>("name").executes(
+      [](std::string_view name) { got = std::format("arg:{}", name); });
+
+  got.clear();
+  check_eq(run(dispatcher, {"prog", "go"}), argdispatch::exit_ok,
+           "a token matching both a literal and an argument route runs");
+  check_eq(got, "go", "the literal command wins over the argument route");
+
+  got.clear();
+  check_eq(run(dispatcher, {"prog", "elsewhere"}), argdispatch::exit_ok,
+           "a token matching only the argument route still runs");
+  check_eq(got, "arg:elsewhere", "the argument route received the token");
+
+  // A duplicate argument-led pattern is still rejected: same shape, same
+  // ambiguity, regardless of what else is registered.
   threw = false;
   try {
-    argdispatch::ArgDispatcher dispatcher;
-    dispatcher.and_then<int>().and_then<int>().executes(dims);
-    dispatcher.and_then<int>().and_then<int>().executes(dims);
+    argdispatch::ArgDispatcher dispatcher2;
+    dispatcher2.and_then<int>().and_then<int>().executes(dims);
+    dispatcher2.and_then<int>().and_then<int>().executes(dims);
   } catch (const std::logic_error &) {
     threw = true;
   }
@@ -719,7 +738,7 @@ int main() {
   test_root_dispatch();
   test_root_zero_arity();
   test_root_accepts_lambdas();
-  test_root_and_commands_are_exclusive();
+  test_root_and_literal_can_coexist();
   test_empty_pattern_coexists();
   test_duplicate_command_rejected();
   test_arguments_are_positional();

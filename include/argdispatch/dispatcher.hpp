@@ -572,10 +572,6 @@ private:
     return !pattern.empty() && !pattern.front().is_argument;
   }
 
-  static bool leads_with_argument(const std::vector<Segment> &pattern) {
-    return !pattern.empty() && pattern.front().is_argument;
-  }
-
   bool has_literal_commands() const {
     for (const auto &route : routes_) {
       if (leads_with_literal(route.pattern))
@@ -623,18 +619,11 @@ private:
   }
 
   void add_route(Route route) {
-    // A leading literal and a leading argument cannot coexist: the first token
-    // would be ambiguous between a command name and a value. The empty pattern
-    // has no leading token, so it conflicts with neither.
+    // A leading literal and a leading argument may coexist at the same
+    // position: dispatch() breaks the tie by literal_count, so an exact
+    // literal match always outranks an argument slot that merely accepts the
+    // same token (see the "most literals wins" comment in dispatch()).
     for (const auto &existing : routes_) {
-      if ((leads_with_literal(existing.pattern) &&
-           leads_with_argument(route.pattern)) ||
-          (leads_with_argument(existing.pattern) &&
-           leads_with_literal(route.pattern))) {
-        throw std::logic_error(
-            "argdispatch: a command starting with a literal cannot be combined "
-            "with one starting with an argument");
-      }
       if (same_shape(existing.pattern, route.pattern)) {
         throw std::logic_error("argdispatch: duplicate command pattern '" +
                                route.usage + "'");
