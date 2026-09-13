@@ -108,9 +108,9 @@ template <> inline constexpr TypeNameMeta type_name<double> = {"double", true};
 template <>
 inline constexpr TypeNameMeta type_name<long double> = {"long double", true};
 template <>
-inline constexpr TypeNameMeta type_name<std::string_view> = {"string", true};
+inline constexpr TypeNameMeta type_name<std::string_view> = {"string", false};
 template <>
-inline constexpr TypeNameMeta type_name<std::string> = {"string", true};
+inline constexpr TypeNameMeta type_name<std::string> = {"string", false};
 
 #endif // ARGDISPATCH_HAS_REFLECTION
 
