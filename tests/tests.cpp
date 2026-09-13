@@ -1,13 +1,18 @@
 // Runtime tests. Negative compile tests live in compile_fail.sh.
 #include <cstdio>
+#include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <memory>
 #include <print>
+#include <sstream>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+
+#include <unistd.h>
 
 #include <argdispatch/argdispatch.hpp>
 
@@ -715,6 +720,66 @@ void test_arguments_are_positional() {
 
 // ------------------------------------------------------------- completions
 
+// Redirects stdout to a temp file for the duration of "fn" and returns what
+// was written, so generated completion scripts can be inspected directly
+// instead of only checking the exit code.
+std::string capture_stdout(const std::function<void()> &fn) {
+  std::fflush(stdout);
+  int saved_fd = dup(fileno(stdout));
+  char path[] = "/tmp/argdispatch_test_completions_XXXXXX";
+  int tmp_fd = mkstemp(path);
+  dup2(tmp_fd, fileno(stdout));
+  close(tmp_fd);
+
+  fn();
+
+  std::fflush(stdout);
+  dup2(saved_fd, fileno(stdout));
+  close(saved_fd);
+
+  std::ifstream in(path);
+  std::ostringstream contents;
+  contents << in.rdbuf();
+  std::remove(path);
+  return contents.str();
+}
+
+// A command whose name is itself an argument, branching into literals only
+// afterward (e.g. "<n> increment" / "<n> reset"), alongside the built-in
+// "--completions" (a leading literal, coexisting per
+// test_root_and_literal_can_coexist). Completion generation used to only
+// ever look at the first token, so neither "increment" nor "reset" was ever
+// offered, only "--completions" was.
+void test_completions_reach_past_the_first_token() {
+  argdispatch::ArgDispatcher dispatcher;
+  dispatcher.register_shell_completions();
+  auto value = dispatcher.and_then<int>("n");
+  value.literal("increment").executes([](int) {});
+  value.literal("reset").executes([](int) {});
+
+  auto fish = capture_stdout([&] { dispatcher.print_completions("prog", "fish"); });
+  check(fish.find("'increment'") != std::string::npos,
+        "fish completions offer a literal branch after a leading argument");
+  check(fish.find("'reset'") != std::string::npos,
+        "fish completions offer every branch, not just the first");
+  // The leading argument slot must still get filename completion: no -f at
+  // the position where that first token is being completed.
+  check(fish.find("-eq 1' -a") != std::string::npos,
+        "the leading argument position keeps default file completion");
+
+  auto bash = capture_stdout([&] { dispatcher.print_completions("prog", "bash"); });
+  check(bash.find("increment") != std::string::npos &&
+            bash.find("reset") != std::string::npos,
+        "bash completions cover both branches after the leading argument");
+  check(bash.find("complete -F") != std::string::npos,
+        "bash completions install a dynamic completion function, not a static wordlist");
+
+  auto zsh = capture_stdout([&] { dispatcher.print_completions("prog", "zsh"); });
+  check(zsh.find("increment") != std::string::npos &&
+            zsh.find("reset") != std::string::npos,
+        "zsh completions cover both branches after the leading argument");
+}
+
 void test_register_completions() {
   argdispatch::ArgDispatcher dispatcher;
   dispatcher.literal("go").executes([] {});
@@ -795,6 +860,7 @@ int main() {
   test_empty_pattern_coexists();
   test_duplicate_command_rejected();
   test_arguments_are_positional();
+  test_completions_reach_past_the_first_token();
   test_register_completions();
   test_register_completions_validates_shells();
 

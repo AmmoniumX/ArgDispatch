@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <filesystem>
 #include <format>
@@ -462,12 +463,15 @@ public:
     return *this;
   }
 
-  // Prints a completion script for "shell" to stdout, covering only the
-  // first token of the command line: which literal command (built-in or
-  // user-registered, aliases included) to run. Patterns are matched
-  // positionally rather than by a fixed set of named flags, so there is no
-  // general notion of "the set of valid values" for a later token to offer
-  // beyond that first one.
+  // Prints a completion script for "shell" to stdout. Every registered
+  // pattern (built-in or user-registered, aliases included) contributes to a
+  // trie over the whole command line, not just its first token: a literal
+  // segment becomes one edge per alias, an argument segment becomes a
+  // wildcard edge, and patterns sharing a prefix share the nodes for it. So
+  // an argument-led command that later branches on a literal (e.g. "<file>
+  // -Qs <section>" alongside "<file> -Sk <section> <key> <value>") gets
+  // completions at that later literal position too, not only at the first
+  // token.
   void print_completions(const char *program, std::string_view shell) const {
     // Registered against the basename, not argv[0] verbatim: bash and zsh
     // match a completion binding against the literal command word as typed,
@@ -476,51 +480,14 @@ public:
     // spelling. A basename is what fires once the completion is installed
     // and the command is run the normal way, off $PATH.
     auto name = program_basename(program);
-    auto candidates = completion_candidates();
+    auto nodes = build_completion_trie();
 
     if (shell == "bash") {
-      std::string words;
-      for (const auto &candidate : candidates) {
-        if (!words.empty())
-          words += ' ';
-        words += candidate.name;
-      }
-      std::println("complete -W {} {}", shell_quote(words), shell_quote(name));
+      print_bash_completions(name, nodes);
     } else if (shell == "zsh") {
-      // _describe (like the rest of the _* completion functions) only works
-      // when invoked by the completion system itself, so this defines a
-      // named function for it to call rather than running _describe
-      // directly; compdef registers it once compinit has already run, the
-      // same precondition every zsh completion script relies on.
-      std::string function_name = "_" + name;
-      std::println("#compdef {}", name);
-      std::println("");
-      std::println("{}() {{", function_name);
-      // "commands" is itself a zsh special parameter (the command hash
-      // table), so a differently-typed local of that name is rejected; being
-      // inside this function also keeps it out of the caller's scope.
-      std::println("  local -a argdispatch_commands");
-      std::println("  argdispatch_commands=(");
-      for (const auto &candidate : candidates) {
-        std::string entry = candidate.name;
-        if (candidate.description)
-          entry += ":" + *candidate.description;
-        std::println("    {}", shell_quote(entry));
-      }
-      std::println("  )");
-      std::println("  _describe 'command' argdispatch_commands");
-      std::println("}}");
-      std::println("");
-      std::println("compdef {} {}", function_name, shell_quote(name));
+      print_zsh_completions(name, nodes);
     } else if (shell == "fish") {
-      for (const auto &candidate : candidates) {
-        std::string line =
-            std::format("complete -c {} -f -n '__fish_use_subcommand' -a {}",
-                        shell_quote(name), shell_quote(candidate.name));
-        if (candidate.description)
-          line += std::format(" -d {}", shell_quote(*candidate.description));
-        std::println("{}", line);
-      }
+      print_fish_completions(name, nodes);
     } else {
       throw std::runtime_error(
           std::format("error: unsupported shell '{}'", shell));
@@ -800,30 +767,383 @@ private:
     return !pattern.empty() && pattern.front().is_literal();
   }
 
+  // One alternative token valid at some point in the command line, together
+  // with the node reached by taking it. Several names may lead to the same
+  // child when they are aliases of one literal() call.
+  struct CompletionEdge {
+    std::vector<std::string> names;
+    std::optional<std::string> description;
+    std::size_t child;
+  };
+
+  // One position in the space of possible command lines: the literal
+  // alternatives valid there (if any), and, separately, whether some
+  // registered pattern also accepts an arbitrary token there instead.
+  struct CompletionNode {
+    std::vector<CompletionEdge> literal_edges;
+    std::optional<std::size_t> argument_child;
+  };
+
+  // Builds a trie over every registered pattern: a literal segment becomes
+  // one edge per alias (all sharing one child), an argument segment becomes
+  // a single wildcard edge. Patterns that share a prefix share the nodes for
+  // that prefix, so branching (e.g. several literals fanning out after a
+  // shared leading argument) naturally becomes one node with several
+  // children — which is what lets completion generation reach past the
+  // first token.
+  std::vector<CompletionNode> build_completion_trie() const {
+    std::vector<CompletionNode> nodes(1);
+    for (const auto &route : routes_) {
+      std::size_t node = 0;
+      for (const auto &segment : route.pattern) {
+        if (segment.is_literal()) {
+          const auto &literal = std::get<Segment::Literal>(segment.data);
+          std::size_t child = nodes.size();
+          bool found = false;
+          for (auto &edge : nodes[node].literal_edges) {
+            bool overlap = false;
+            for (const auto &name : literal.names) {
+              if (std::ranges::find(edge.names, name) != edge.names.end()) {
+                overlap = true;
+                break;
+              }
+            }
+            if (overlap) {
+              child = edge.child;
+              if (!edge.description)
+                edge.description = route.description;
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            nodes.push_back({});
+            nodes[node].literal_edges.push_back(
+                {literal.names, route.description, child});
+          }
+          node = child;
+        } else {
+          if (!nodes[node].argument_child) {
+            nodes[node].argument_child = nodes.size();
+            nodes.push_back({});
+          }
+          node = *nodes[node].argument_child;
+        }
+      }
+    }
+    return nodes;
+  }
+
   struct CompletionCandidate {
     std::string name;
     std::optional<std::string> description;
   };
 
-  // Every name a literal-led route accepts as its first token (aliases
-  // included), each paired with that route's description, sorted and
-  // deduplicated by name.
-  std::vector<CompletionCandidate> completion_candidates() const {
+  // Every alternative valid at "node", sorted and deduplicated by name.
+  static std::vector<CompletionCandidate>
+  node_candidates(const CompletionNode &node) {
     std::vector<CompletionCandidate> candidates;
-    for (const auto &route : routes_) {
-      if (!leads_with_literal(route.pattern))
-        continue;
-      const auto &literal =
-          std::get<Segment::Literal>(route.pattern.front().data);
-      for (const auto &name : literal.names) {
-        candidates.push_back({name, route.description});
-      }
+    for (const auto &edge : node.literal_edges) {
+      for (const auto &name : edge.names)
+        candidates.push_back({name, edge.description});
     }
     std::ranges::sort(candidates, {}, &CompletionCandidate::name);
     candidates.erase(
         std::ranges::unique(candidates, {}, &CompletionCandidate::name).begin(),
         candidates.end());
     return candidates;
+  }
+
+  // fish: one "complete" line per candidate at this node, guarded by an -n
+  // condition checking both the token position (via how many words have
+  // been typed so far) and, for every literal ancestor on the path to this
+  // node, that the token at that position was one of its names.
+  // "contains_clauses" carries that accumulated ancestor check forward; it
+  // is unaffected by argument ancestors, which impose no constraint of
+  // their own. "-f" (suppress the shell's default filename completion) is
+  // added only when nothing at this position can be a freeform token, so an
+  // argument slot that happens to sit alongside a literal alternative (like
+  // a leading "<file>" next to "--help") still gets filename completion.
+  void print_fish_node(const std::string &name,
+                       const std::vector<CompletionNode> &nodes,
+                       std::size_t node_idx, std::size_t depth,
+                       const std::string &contains_clauses) const {
+    const auto &node = nodes[node_idx];
+    auto candidates = node_candidates(node);
+    if (!candidates.empty()) {
+      std::string condition =
+          std::format(
+              "set -l tokens (commandline -opc); test (count $tokens) -eq {}",
+              depth + 1) +
+          contains_clauses;
+      bool allows_argument = node.argument_child.has_value();
+      for (const auto &candidate : candidates) {
+        std::string line =
+            std::format("complete -c {} -n {}", shell_quote(name),
+                        shell_quote(condition));
+        if (!allows_argument)
+          line += " -f";
+        line += std::format(" -a {}", shell_quote(candidate.name));
+        if (candidate.description)
+          line += std::format(" -d {}", shell_quote(*candidate.description));
+        std::println("{}", line);
+      }
+    }
+    for (const auto &edge : node.literal_edges) {
+      std::string names;
+      for (const auto &edge_name : edge.names) {
+        if (!names.empty())
+          names += ' ';
+        names += shell_quote(edge_name);
+      }
+      std::string next_clauses =
+          contains_clauses +
+          std::format("; and contains -- \"$tokens[{}]\" {}", depth + 2,
+                      names);
+      print_fish_node(name, nodes, edge.child, depth + 1, next_clauses);
+    }
+    if (node.argument_child) {
+      print_fish_node(name, nodes, *node.argument_child, depth + 1,
+                      contains_clauses);
+    }
+  }
+
+  void print_fish_completions(const std::string &name,
+                             const std::vector<CompletionNode> &nodes) const {
+    print_fish_node(name, nodes, /*node_idx=*/0, /*depth=*/0, "");
+  }
+
+  // The trie's edges, flattened into parallel vectors indexed by an
+  // arbitrary but stable edge id (every node's edges precede those of any
+  // node discovered after it). bash and zsh both encode the trie the same
+  // way, as data for a generated script to walk generically at completion
+  // time, so they share this.
+  struct FlatCompletionEdges {
+    std::vector<std::size_t> parent;
+    std::vector<std::string> names; // space-joined aliases for this edge
+    std::vector<std::optional<std::string>> description;
+    std::vector<std::size_t> child;
+  };
+
+  static FlatCompletionEdges
+  flatten_completion_edges(const std::vector<CompletionNode> &nodes) {
+    FlatCompletionEdges edges;
+    for (std::size_t node_idx = 0; node_idx < nodes.size(); ++node_idx) {
+      for (const auto &edge : nodes[node_idx].literal_edges) {
+        edges.parent.push_back(node_idx);
+        std::string joined;
+        for (const auto &edge_name : edge.names) {
+          if (!joined.empty())
+            joined += ' ';
+          joined += edge_name;
+        }
+        edges.names.push_back(std::move(joined));
+        edges.description.push_back(edge.description);
+        edges.child.push_back(edge.child);
+      }
+    }
+    return edges;
+  }
+
+  // A shell-identifier-safe rendering of "name", for the generated
+  // variable/function names in the bash and zsh scripts: neither allows
+  // punctuation there.
+  static std::string sanitize_identifier(const std::string &name) {
+    std::string ident;
+    for (char c : name) {
+      ident += (std::isalnum(static_cast<unsigned char>(c)) ? c : '_');
+    }
+    if (ident.empty() ||
+        std::isdigit(static_cast<unsigned char>(ident.front())))
+      ident = "_" + ident;
+    return ident;
+  }
+
+  static void replace_all(std::string &text, std::string_view from,
+                          std::string_view to) {
+    std::size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::string::npos) {
+      text.replace(pos, from.size(), to);
+      pos += to.size();
+    }
+  }
+
+  // bash has no positional/conditional notion in a static "complete -W"
+  // wordlist, so this emits the trie itself as data — parallel arrays keyed
+  // by an edge id, plus a node -> argument-child map — alongside one fixed
+  // "-F" function that walks it: replay the already-typed words down the
+  // trie to find the current node, then offer that node's literal edges
+  // (falling back to filename completion too, if it also has an argument
+  // child).
+  void print_bash_completions(const std::string &name,
+                              const std::vector<CompletionNode> &nodes) const {
+    std::string prefix = "_argdispatch_" + sanitize_identifier(name);
+    auto edges = flatten_completion_edges(nodes);
+
+    std::string parents, names_arr, children, arg_pairs;
+    for (std::size_t i = 0; i < edges.parent.size(); ++i) {
+      if (!parents.empty())
+        parents += ' ';
+      parents += std::to_string(edges.parent[i]);
+      if (!names_arr.empty())
+        names_arr += ' ';
+      names_arr += shell_quote(edges.names[i]);
+      if (!children.empty())
+        children += ' ';
+      children += std::to_string(edges.child[i]);
+    }
+    for (std::size_t node_idx = 0; node_idx < nodes.size(); ++node_idx) {
+      if (nodes[node_idx].argument_child) {
+        arg_pairs += std::format("[{}]={} ", node_idx,
+                                 *nodes[node_idx].argument_child);
+      }
+    }
+
+    std::string script = R"BASH(@PREFIX@_edge_parent=(@PARENTS@)
+@PREFIX@_edge_names=(@NAMES@)
+@PREFIX@_edge_child=(@CHILDREN@)
+declare -A @PREFIX@_arg_child=(@ARGPAIRS@)
+
+@PREFIX@_complete() {
+  local cur=${COMP_WORDS[COMP_CWORD]}
+  local node=0 i tok found e n
+  for ((i = 1; i < COMP_CWORD; i++)); do
+    tok="${COMP_WORDS[i]}"
+    found=""
+    for e in "${!@PREFIX@_edge_parent[@]}"; do
+      if [[ "${@PREFIX@_edge_parent[$e]}" == "$node" ]]; then
+        for n in ${@PREFIX@_edge_names[$e]}; do
+          if [[ "$n" == "$tok" ]]; then
+            found="${@PREFIX@_edge_child[$e]}"
+            break 2
+          fi
+        done
+      fi
+    done
+    if [[ -z "$found" && -n "${@PREFIX@_arg_child[$node]+x}" ]]; then
+      found="${@PREFIX@_arg_child[$node]}"
+    fi
+    if [[ -z "$found" ]]; then
+      COMPREPLY=()
+      return
+    fi
+    node="$found"
+  done
+  local -a words=()
+  for e in "${!@PREFIX@_edge_parent[@]}"; do
+    if [[ "${@PREFIX@_edge_parent[$e]}" == "$node" ]]; then
+      words+=(${@PREFIX@_edge_names[$e]})
+    fi
+  done
+  if [[ ${#words[@]} -gt 0 ]]; then
+    COMPREPLY+=($(compgen -W "${words[*]}" -- "$cur"))
+  fi
+  if [[ -n "${@PREFIX@_arg_child[$node]+x}" ]]; then
+    COMPREPLY+=($(compgen -f -- "$cur"))
+  fi
+}
+
+complete -F @PREFIX@_complete @QNAME@
+)BASH";
+    replace_all(script, "@PREFIX@", prefix);
+    replace_all(script, "@NAMES@", names_arr);
+    replace_all(script, "@PARENTS@", parents);
+    replace_all(script, "@CHILDREN@", children);
+    replace_all(script, "@ARGPAIRS@", arg_pairs);
+    replace_all(script, "@QNAME@", shell_quote(name));
+    std::print("{}", script);
+  }
+
+  // zsh gets the same trie-as-data treatment as bash (see
+  // print_bash_completions), adapted to zsh's associative arrays and
+  // $words/$CURRENT instead of $COMP_WORDS/$COMP_CWORD, plus per-candidate
+  // descriptions (compadd's parallel "-d" array), since zsh's completion
+  // system displays them naturally.
+  void print_zsh_completions(const std::string &name,
+                             const std::vector<CompletionNode> &nodes) const {
+    std::string prefix = "_argdispatch_" + sanitize_identifier(name);
+    auto edges = flatten_completion_edges(nodes);
+
+    std::string parent_pairs, names_pairs, desc_pairs, child_pairs, arg_pairs;
+    for (std::size_t i = 0; i < edges.parent.size(); ++i) {
+      parent_pairs += std::format("[{}]={} ", i, edges.parent[i]);
+      names_pairs += std::format("[{}]={} ", i, shell_quote(edges.names[i]));
+      if (edges.description[i]) {
+        desc_pairs +=
+            std::format("[{}]={} ", i, shell_quote(*edges.description[i]));
+      }
+      child_pairs += std::format("[{}]={} ", i, edges.child[i]);
+    }
+    for (std::size_t node_idx = 0; node_idx < nodes.size(); ++node_idx) {
+      if (nodes[node_idx].argument_child) {
+        arg_pairs += std::format("[{}]={} ", node_idx,
+                                 *nodes[node_idx].argument_child);
+      }
+    }
+
+    std::string script = R"ZSH(#compdef @NAME@
+
+typeset -gA @PREFIX@_edge_parent @PREFIX@_edge_names @PREFIX@_edge_desc
+typeset -gA @PREFIX@_edge_child @PREFIX@_arg_child
+
+@PREFIX@_edge_parent=(@PARENTPAIRS@)
+@PREFIX@_edge_names=(@NAMEPAIRS@)
+@PREFIX@_edge_desc=(@DESCPAIRS@)
+@PREFIX@_edge_child=(@CHILDPAIRS@)
+@PREFIX@_arg_child=(@ARGPAIRS@)
+
+@PREFIX@_complete() {
+  local node=0 i tok found e n
+  for ((i = 2; i < CURRENT; i++)); do
+    tok="${words[i]}"
+    found=""
+    for e in "${(k)@PREFIX@_edge_parent[@]}"; do
+      if [[ "${@PREFIX@_edge_parent[$e]}" == "$node" ]]; then
+        for n in ${=@PREFIX@_edge_names[$e]}; do
+          if [[ "$n" == "$tok" ]]; then
+            found="${@PREFIX@_edge_child[$e]}"
+            break 2
+          fi
+        done
+      fi
+    done
+    if [[ -z "$found" && -n "${@PREFIX@_arg_child[$node]+x}" ]]; then
+      found="${@PREFIX@_arg_child[$node]}"
+    fi
+    if [[ -z "$found" ]]; then
+      return 1
+    fi
+    node="$found"
+  done
+
+  local -a words_out descs
+  for e in "${(k)@PREFIX@_edge_parent[@]}"; do
+    if [[ "${@PREFIX@_edge_parent[$e]}" == "$node" ]]; then
+      for n in ${=@PREFIX@_edge_names[$e]}; do
+        words_out+=("$n")
+        descs+=("${@PREFIX@_edge_desc[$e]:-$n}")
+      done
+    fi
+  done
+  if [[ ${#words_out[@]} -gt 0 ]]; then
+    compadd -d descs -a words_out
+  fi
+  if [[ -n "${@PREFIX@_arg_child[$node]+x}" ]]; then
+    _files
+  fi
+}
+
+compdef @PREFIX@_complete @QNAME@
+)ZSH";
+    replace_all(script, "@PREFIX@", prefix);
+    replace_all(script, "@PARENTPAIRS@", parent_pairs);
+    replace_all(script, "@NAMEPAIRS@", names_pairs);
+    replace_all(script, "@DESCPAIRS@", desc_pairs);
+    replace_all(script, "@CHILDPAIRS@", child_pairs);
+    replace_all(script, "@ARGPAIRS@", arg_pairs);
+    replace_all(script, "@NAME@", name);
+    replace_all(script, "@QNAME@", shell_quote(name));
+    std::print("{}", script);
   }
 
   // Wraps "text" in single quotes for safe embedding in a generated shell
