@@ -19,6 +19,7 @@
 
 #include <array>
 #include <cstddef>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <optional>
@@ -504,11 +505,17 @@ public:
   // name} {version (optional)} - {description (optional)}". This is what the
   // auto-generated "--version" command prints.
   void print_version(const char *program) const {
+    auto p = std::filesystem::path(program).filename();
+    program = p.c_str();
     std::println("{}", header_line(program));
   }
 
   void print_usage(const char *program) const {
-    auto program_name = program_name_.value_or(program);
+    auto p = std::filesystem::path(program).filename();
+    program = p.c_str();
+    auto program_name =
+        program_name_.transform([](auto &pn) { return pn.c_str(); })
+            .value_or(program);
     if (usage_string_) {
       std::visit(
           overloaded{
