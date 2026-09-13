@@ -713,6 +713,58 @@ void test_arguments_are_positional() {
            argdispatch::exit_args, "labels are not flags");
 }
 
+// ------------------------------------------------------------- completions
+
+void test_register_completions() {
+  argdispatch::ArgDispatcher dispatcher;
+  dispatcher.literal("go").executes([] {});
+  dispatcher.register_shell_completions();
+
+  check_eq(run(dispatcher, {"prog", "--completions", "bash"}),
+           argdispatch::exit_ok, "bash completions");
+  check_eq(run(dispatcher, {"prog", "--completions", "zsh"}),
+           argdispatch::exit_ok, "zsh completions");
+  check_eq(run(dispatcher, {"prog", "--completions", "fish"}),
+           argdispatch::exit_ok, "fish completions");
+
+  // An unsupported shell is just an unrecognised trailing token: it falls
+  // through to the ordinary "invalid arguments" path rather than reaching
+  // print_completions() at all.
+  check_eq(run(dispatcher, {"prog", "--completions", "powershell"}),
+           argdispatch::exit_args, "unsupported shell rejected at dispatch");
+  check_eq(run(dispatcher, {"prog", "--completions"}), argdispatch::exit_args,
+           "missing shell argument rejected at dispatch");
+
+  // Registering the same pattern twice is a no-op, not an error.
+  bool threw = false;
+  try {
+    dispatcher.register_shell_completions();
+  } catch (const std::logic_error &) {
+    threw = true;
+  }
+  check(!threw, "re-registering the same completions pattern is a no-op");
+}
+
+void test_register_completions_validates_shells() {
+  bool threw = false;
+  try {
+    argdispatch::ArgDispatcher dispatcher;
+    dispatcher.register_shell_completions({"--completions"}, {"powershell"});
+  } catch (const std::logic_error &) {
+    threw = true;
+  }
+  check(threw, "an unsupported shell is rejected at registration time");
+
+  threw = false;
+  try {
+    argdispatch::ArgDispatcher dispatcher;
+    dispatcher.register_shell_completions({"--completions"}, {});
+  } catch (const std::logic_error &) {
+    threw = true;
+  }
+  check(threw, "an empty shell list is rejected at registration time");
+}
+
 } // namespace
 
 int main() {
@@ -743,6 +795,8 @@ int main() {
   test_empty_pattern_coexists();
   test_duplicate_command_rejected();
   test_arguments_are_positional();
+  test_register_completions();
+  test_register_completions_validates_shells();
 
   if (failures == 0) {
     std::println("all {} checks passed", checks);

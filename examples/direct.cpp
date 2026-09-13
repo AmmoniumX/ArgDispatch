@@ -31,6 +31,8 @@ int main(int argc, char **argv) {
       .and_then<Mode>("mode")
       .executes(report);
 
+  dispatcher.register_all_builtins();
+
   const auto d = std::move(dispatcher).build();
 
   return d.dispatch(argc, argv);

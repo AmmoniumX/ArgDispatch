@@ -17,6 +17,7 @@
 #ifndef ARGDISPATCH_DISPATCHER_HPP
 #define ARGDISPATCH_DISPATCHER_HPP
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <filesystem>
@@ -93,7 +94,39 @@ struct Segment {
   }
 };
 
+// "device <name:std::string_view> increment <amount:int>"
+inline std::string build_usage_(std::span<const TypeNameMeta> types,
+                                std::span<const Segment> pattern) {
+  std::string usage;
+  std::size_t argument = 0;
+  for (const auto &segment : pattern) {
+    if (!usage.empty())
+      usage += ' ';
+    if (segment.is_argument()) {
+      const auto &label = std::get<Segment::Argument>(segment.data).label;
+      if (!label.empty()) {
+        if (types[argument].show) {
+          usage += std::format("<{}:{}>", label, types[argument].name);
+        } else {
+          usage += std::format("<{}>", label);
+        }
+        ++argument;
+      } else {
+        usage += std::format("<{}>", types[argument++].name);
+      }
+    } else {
+      usage += std::get<Segment::Literal>(segment.data).display();
+    }
+  }
+  return usage;
+}
+
 class ArgDispatcher {
+public:
+  static constexpr auto SUPPORTED_COMPLETION_SHELLS =
+      std::initializer_list<std::string_view>{"bash", "zsh", "fish"};
+
+private:
   // Ordinary routes carry User: dispatch() runs their invoke closure. The
   // built-in "--help"/"--version" routes carry Help/Version instead of a
   // closure, so dispatch() can call print_usage()/print_version() on
@@ -101,7 +134,7 @@ class ArgDispatcher {
   // capture a dispatcher pointer at registration time — a pointer that
   // dangles the moment the dispatcher is later moved (e.g. by build() &&).
   struct Route {
-    enum class Kind { User, Help, Version };
+    enum class Kind { User, Help, Version, Completions };
 
     std::vector<Segment> pattern;
     std::string usage;
@@ -304,31 +337,9 @@ public:
       return labels;
     }
 
-    // "device <name:std::string_view> increment <amount:int>"
     std::string build_usage() const {
       const std::array<TypeNameMeta, sizeof...(Ds)> types{type_name<Ds>...};
-      std::string usage;
-      std::size_t argument = 0;
-      for (const auto &segment : pattern_) {
-        if (!usage.empty())
-          usage += ' ';
-        if (segment.is_argument()) {
-          const auto &label = std::get<Segment::Argument>(segment.data).label;
-          if (!label.empty()) {
-            if (types[argument].show) {
-              usage += std::format("<{}:{}>", label, types[argument].name);
-            } else {
-              usage += std::format("<{}>", label);
-            }
-            ++argument;
-          } else {
-            usage += std::format("<{}>", types[argument++].name);
-          }
-        } else {
-          usage += std::get<Segment::Literal>(segment.data).display();
-        }
-      }
-      return usage;
+      return build_usage_(types, pattern_);
     }
 
     // Register the route, type-erasing `callable` behind a move_only_function
@@ -448,6 +459,71 @@ public:
     return *this;
   }
 
+  // Prints a completion script for "shell" to stdout, covering only the
+  // first token of the command line: which literal command (built-in or
+  // user-registered, aliases included) to run. Patterns are matched
+  // positionally rather than by a fixed set of named flags, so there is no
+  // general notion of "the set of valid values" for a later token to offer
+  // beyond that first one.
+  void print_completions(const char *program, std::string_view shell) const {
+    // Registered against the basename, not argv[0] verbatim: bash and zsh
+    // match a completion binding against the literal command word as typed,
+    // with no path-awareness at all, so binding to a dev-time invocation
+    // path (e.g. "./build/prog") would only ever fire for that exact
+    // spelling. A basename is what fires once the completion is installed
+    // and the command is run the normal way, off $PATH.
+    auto name = program_basename(program);
+    auto candidates = completion_candidates();
+
+    if (shell == "bash") {
+      std::string words;
+      for (const auto &candidate : candidates) {
+        if (!words.empty())
+          words += ' ';
+        words += candidate.name;
+      }
+      std::println("complete -W {} {}", shell_quote(words), shell_quote(name));
+    } else if (shell == "zsh") {
+      // _describe (like the rest of the _* completion functions) only works
+      // when invoked by the completion system itself, so this defines a
+      // named function for it to call rather than running _describe
+      // directly; compdef registers it once compinit has already run, the
+      // same precondition every zsh completion script relies on.
+      std::string function_name = "_" + name;
+      std::println("#compdef {}", name);
+      std::println("");
+      std::println("{}() {{", function_name);
+      // "commands" is itself a zsh special parameter (the command hash
+      // table), so a differently-typed local of that name is rejected; being
+      // inside this function also keeps it out of the caller's scope.
+      std::println("  local -a argdispatch_commands");
+      std::println("  argdispatch_commands=(");
+      for (const auto &candidate : candidates) {
+        std::string entry = candidate.name;
+        if (candidate.description)
+          entry += ":" + *candidate.description;
+        std::println("    {}", shell_quote(entry));
+      }
+      std::println("  )");
+      std::println("  _describe 'command' argdispatch_commands");
+      std::println("}}");
+      std::println("");
+      std::println("compdef {} {}", function_name, shell_quote(name));
+    } else if (shell == "fish") {
+      for (const auto &candidate : candidates) {
+        std::string line = std::format(
+            "complete -c {} -f -n '__fish_use_subcommand' -a {}",
+            shell_quote(name), shell_quote(candidate.name));
+        if (candidate.description)
+          line += std::format(" -d {}", shell_quote(*candidate.description));
+        std::println("{}", line);
+      }
+    } else {
+      throw std::runtime_error(
+          std::format("error: unsupported shell '{}'", shell));
+    }
+  }
+
   // Match the tokens after the program name against the registered patterns and
   // run the best fit. Literal segments must match exactly; argument segments
   // each consume one token.
@@ -476,6 +552,9 @@ public:
         return exit_ok;
       case Route::Kind::Version:
         print_version(program);
+        return exit_ok;
+      case Route::Kind::Completions:
+        print_completions(program, tokens[1]);
         return exit_ok;
       case Route::Kind::User:
         return best->invoke(arguments_of(*best, tokens));
@@ -609,7 +688,7 @@ public:
 
   auto &register_help(std::initializer_list<std::string> aliases = {"--help"},
                       std::string description = "prints this help message") {
-    register_builtin_command(aliases.begin()->c_str(), std::move(description),
+    register_builtin_command(std::move(aliases), std::move(description),
                              Route::Kind::Help);
     return *this;
   }
@@ -617,13 +696,49 @@ public:
   auto &
   register_version(std::initializer_list<std::string> aliases = {"--version"},
                    std::string description = "prints version information") {
-    register_builtin_command(aliases.begin()->c_str(), std::move(description),
+    register_builtin_command(std::move(aliases), std::move(description),
                              Route::Kind::Version);
     return *this;
   }
 
+  // Registers "--completions <shell>" (accepting whichever of "shells" the
+  // caller wants to offer). The shell name is matched as an ordinary literal
+  // segment, exactly like a subcommand name, so an unrecognised shell falls
+  // through to the same "expected one of:" error a bad subcommand gets
+  // rather than reaching print_completions() at all.
+  auto &register_shell_completions(
+      std::initializer_list<std::string> aliases = {"--completions"},
+      std::initializer_list<std::string> shells = {"bash", "zsh", "fish"},
+      std::string description = "prints shell completions") {
+    if (shells.size() == 0) {
+      throw std::logic_error(
+          "argdispatch: register_completions() requires at least one shell");
+    }
+    for (const auto &shell : shells) {
+      if (std::ranges::find(SUPPORTED_COMPLETION_SHELLS, shell) ==
+          std::ranges::end(SUPPORTED_COMPLETION_SHELLS)) {
+        throw std::logic_error("argdispatch: unsupported completion shell '" +
+                               shell + "'");
+      }
+    }
+
+    std::vector<Segment> pattern{Segment{Segment::Literal{aliases}},
+                                 Segment{Segment::Literal{shells}}};
+    for (const auto &existing : routes_) {
+      if (same_shape(existing.pattern, pattern))
+        return *this;
+    }
+    std::string usage = build_usage_({}, pattern);
+    routes_.push_back(Route{std::move(pattern), std::move(usage),
+                            /*literal_count=*/2, std::move(description),
+                            /*invoke=*/nullptr, Route::Kind::Completions});
+    return *this;
+  }
+
   // Registers "--help" and "--version" as ordinary routes
-  auto &register_all_builtins() { return register_help().register_version(); }
+  auto &register_all_builtins() {
+    return register_help().register_version().register_shell_completions();
+  }
 
 private:
   Builder<> root() { return Builder<>(this, std::vector<Segment>{}); }
@@ -641,15 +756,17 @@ private:
     register_all_builtins();
   }
 
-  void register_builtin_command(std::string name, std::string description,
-                                Route::Kind kind) {
-    std::vector<Segment> pattern{Segment{Segment::Literal{{name}}}};
+  void register_builtin_command(std::initializer_list<std::string> names,
+                                std::string description, Route::Kind kind) {
+    std::vector<Segment> pattern{Segment{Segment::Literal{names}}};
     for (const auto &existing : routes_) {
       if (same_shape(existing.pattern, pattern))
         return;
     }
-    routes_.push_back(Route{std::move(pattern), name, /*literal_count=*/1,
-                            std::move(description), /*invoke=*/nullptr, kind});
+    std::string usage = build_usage_({}, pattern);
+    routes_.push_back(Route{std::move(pattern), std::move(usage),
+                            /*literal_count=*/1, std::move(description),
+                            /*invoke=*/nullptr, kind});
   }
 
   // "{program_name} {version (optional)} - {description (optional)}"
@@ -678,6 +795,47 @@ private:
 
   static bool leads_with_literal(const std::vector<Segment> &pattern) {
     return !pattern.empty() && pattern.front().is_literal();
+  }
+
+  struct CompletionCandidate {
+    std::string name;
+    std::optional<std::string> description;
+  };
+
+  // Every name a literal-led route accepts as its first token (aliases
+  // included), each paired with that route's description, sorted and
+  // deduplicated by name.
+  std::vector<CompletionCandidate> completion_candidates() const {
+    std::vector<CompletionCandidate> candidates;
+    for (const auto &route : routes_) {
+      if (!leads_with_literal(route.pattern))
+        continue;
+      const auto &literal =
+          std::get<Segment::Literal>(route.pattern.front().data);
+      for (const auto &name : literal.names) {
+        candidates.push_back({name, route.description});
+      }
+    }
+    std::ranges::sort(candidates, {}, &CompletionCandidate::name);
+    candidates.erase(
+        std::ranges::unique(candidates, {}, &CompletionCandidate::name).begin(),
+        candidates.end());
+    return candidates;
+  }
+
+  // Wraps "text" in single quotes for safe embedding in a generated shell
+  // script, escaping any single quote it contains.
+  static std::string shell_quote(std::string_view text) {
+    std::string quoted = "'";
+    for (char c : text) {
+      if (c == '\'') {
+        quoted += "'\\''";
+      } else {
+        quoted += c;
+      }
+    }
+    quoted += "'";
+    return quoted;
   }
 
   bool has_literal_commands() const {

@@ -146,10 +146,52 @@ so they surface on the first lines of `main` rather than at parse time.
 
 See `examples/direct.cpp` for the full program.
 
+## Shell completions
+
+`build()` auto-registers a `--completions <shell>` command alongside `--help`/`--version`
+for any dispatcher with at least one literal-led command, generating a completion script for
+`bash`, `zsh`, or `fish` on demand:
+
+```bash
+# bash
+eval "$(demo --completions bash)"
+
+# zsh
+eval "$(demo --completions zsh)"
+
+# fish
+demo --completions fish | source
+```
+
+Completion covers only the first word: which top-level command (built-in or user-registered,
+aliases included) to run. Patterns are matched positionally rather than by a fixed set of named
+flags, so there is no general notion of "the set of valid values" for a later argument to offer
+beyond that.
+
+An argument-led dispatcher does not get `--completions` by default, for the same reason it
+doesn't get `--help`/`--version` for free: a leading literal would be ambiguous with an actual argument. Register it explicitly instead, which is safe to do even alongside
+argument-led commands (see "Starting a chain" above):
+
+```cpp
+dispatcher.and_then<int>("width").and_then<int>("height").and_then<Mode>("mode").executes(report);
+dispatcher.register_shell_completions();     // or register_all_builtins() for --help/--version too
+```
+
+`register_shell_completions()` takes the same shape as `register_help()`/`register_version()`:
+optional aliases (default `{"--completions"}`), which shells to offer (default all three), and
+a description. Offer a subset:
+
+```cpp
+dispatcher.register_shell_completions({"--completions"}, {"bash", "zsh"});
+```
+
+An unsupported shell name is rejected with `std::logic_error` at registration time.
+
 ## Requirements
 
-C++23 at minimum, on g++ 16 or later (developed against g++ 16.1.1). Clang cannot compile this
-yet, reflection or not, for unrelated reasons.
+- Minimum: C++23
+
+- Recommended: C++26 on g++ 16 or later (developed against g++ 16.1.1). 
 
 Building with `-std=c++26 -freflection` derives `type_name` and `enum_table` from `<meta>`.
 Without it, `enum_table` falls back to the vendored `magic_enum` (`include/magic_enum/`), so an
