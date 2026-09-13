@@ -185,7 +185,8 @@ public:
     // Shared by both callable executes() overloads.
     template <typename F>
       requires std::is_class_v<F>
-    void bind_callable(F callable, std::optional<std::string> description) const {
+    void bind_callable(F callable,
+                       std::optional<std::string> description) const {
       if constexpr (has_plain_call_operator<F>) {
         // A non-generic lambda's parameter types are recoverable from its
         // operator(), so it gets exactly the same checking a plain function
@@ -217,7 +218,7 @@ public:
     // the and_then<> chain.
     template <typename R, typename... Args>
     void bind_function(R (*f)(Args...),
-                        std::optional<std::string> description) const {
+                       std::optional<std::string> description) const {
       static_assert(
           sizeof...(Ds) == sizeof...(Args),
           "and_then<> chain length does not match the function's arity");
@@ -364,7 +365,7 @@ public:
   int dispatch(std::span<const char *const> args) const {
     const char *program = args.size() > 0 ? args[0] : "program";
     current_program_ = program;
-    register_builtin_commands();
+    autoregister_builtin_commands();
     const std::vector<std::string_view> tokens =
         args.subspan(1) | std::views::transform([](const char *c) {
           return std::string_view(c);
@@ -504,19 +505,8 @@ public:
     }
   }
 
-private:
-  Builder<> root() { return Builder<>(this, std::vector<Segment>{}); }
-
-  // Registers "--help" and "--version" as ordinary routes, each a single
-  // literal segment with no arguments, unless a route with that same shape
-  // is already registered (by the user, or by a previous dispatch() call).
-  //
-  // Skipped entirely for an argument-led or bare dispatcher: a leading
-  // literal there would be ambiguous with (or steal) an actual argument, the
-  // same conflict add_route() rejects for any other literal-led command.
+  // Registers "--help" and "--version" as ordinary routes
   void register_builtin_commands() const {
-    if (!routes_.empty() && !has_literal_commands())
-      return;
 
     register_builtin_command("--help", "prints this help message",
                              [this](std::span<const std::string_view>) {
@@ -528,6 +518,22 @@ private:
                                print_version(current_program_);
                                return exit_ok;
                              });
+  }
+
+private:
+  Builder<> root() { return Builder<>(this, std::vector<Segment>{}); }
+
+  // Registers "--help" and "--version" as ordinary routes, each a single
+  // literal segment with no arguments, unless a route with that same shape
+  // is already registered (by the user, or by a previous dispatch() call).
+  //
+  // Skipped entirely for an argument-led or bare dispatcher: a leading
+  // literal there would be ambiguous with (or steal) an actual argument, the
+  // same conflict add_route() rejects for any other literal-led command.
+  void autoregister_builtin_commands() const {
+    if (!routes_.empty() && !has_literal_commands())
+      return;
+    register_builtin_commands();
   }
 
   void register_builtin_command(
