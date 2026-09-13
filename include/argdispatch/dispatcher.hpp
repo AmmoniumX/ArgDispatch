@@ -61,14 +61,22 @@ class ArgDispatcher {
     std::vector<Segment> pattern;
     std::string usage;
     std::size_t literal_count;
+    std::optional<std::string> description;
     std::move_only_function<int(std::span<const std::string_view>) const>
         invoke;
   };
 
-  std::vector<Route> routes_;
+  // Mutable: dispatch() is logically const from the caller's point of view,
+  // but lazily registers the built-in "--help"/"--version" routes (unless
+  // the user already registered one with the same pattern) the first time
+  // it runs.
+  mutable std::vector<Route> routes_;
   std::optional<std::string> program_name_;
   std::optional<std::string> version_;
   std::optional<std::string> description_;
+  // The argv[0] passed to the current dispatch() call, for the built-in
+  // commands' invokers to format usage/version text with.
+  mutable const char *current_program_ = "program";
 
 public:
   struct Options {
@@ -146,19 +154,14 @@ public:
     // template deduction and checked against the and_then<> chain.
     template <typename R, typename... Args>
     void executes(R (*f)(Args...)) const {
-      static_assert(
-          sizeof...(Ds) == sizeof...(Args),
-          "and_then<> chain length does not match the function's arity");
-      static_assert(
-          std::is_same_v<std::tuple<Ds...>, std::tuple<Args...>>,
-          "and_then<> types do not match the function's parameter types");
+      bind_function(f, std::nullopt);
+    }
 
-      // Guarded so that a mismatched chain reports the assertions above and
-      // nothing else: instantiating the body too would bury them in cascading
-      // conversion errors.
-      if constexpr (std::is_same_v<std::tuple<Ds...>, std::tuple<Args...>>) {
-        bind(f);
-      }
+    // Same as above, plus a description of what the command does, printed
+    // next to it in print_usage().
+    template <typename R, typename... Args>
+    void executes(R (*f)(Args...), std::string description) const {
+      bind_function(f, std::move(description));
     }
 
     // Bind the pattern to any callable: a lambda (capturing or not), or a
@@ -167,6 +170,22 @@ public:
     template <typename F>
       requires std::is_class_v<F>
     void executes(F callable) const {
+      bind_callable(std::move(callable), std::nullopt);
+    }
+
+    // Same as above, plus a description of what the command does, printed
+    // next to it in print_usage().
+    template <typename F>
+      requires std::is_class_v<F>
+    void executes(F callable, std::string description) const {
+      bind_callable(std::move(callable), std::move(description));
+    }
+
+  private:
+    // Shared by both callable executes() overloads.
+    template <typename F>
+      requires std::is_class_v<F>
+    void bind_callable(F callable, std::optional<std::string> description) const {
       if constexpr (has_plain_call_operator<F>) {
         // A non-generic lambda's parameter types are recoverable from its
         // operator(), so it gets exactly the same checking a plain function
@@ -178,7 +197,7 @@ public:
             std::is_same_v<std::tuple<Ds...>, callable_args_t<F>>,
             "and_then<> types do not match the callable's parameter types");
         if constexpr (std::is_same_v<std::tuple<Ds...>, callable_args_t<F>>) {
-          bind(std::move(callable));
+          bind(std::move(callable), std::move(description));
         }
       } else {
         // Generic lambdas have a templated operator() with no inspectable
@@ -188,12 +207,32 @@ public:
             std::is_invocable_v<F &, Ds...>,
             "callable is not invocable with the and_then<> argument types");
         if constexpr (std::is_invocable_v<F &, Ds...>) {
-          bind(std::move(callable));
+          bind(std::move(callable), std::move(description));
         }
       }
     }
 
-  private:
+    // Shared by both function-pointer executes() overloads: the parameter
+    // types are recovered by ordinary template deduction and checked against
+    // the and_then<> chain.
+    template <typename R, typename... Args>
+    void bind_function(R (*f)(Args...),
+                        std::optional<std::string> description) const {
+      static_assert(
+          sizeof...(Ds) == sizeof...(Args),
+          "and_then<> chain length does not match the function's arity");
+      static_assert(
+          std::is_same_v<std::tuple<Ds...>, std::tuple<Args...>>,
+          "and_then<> types do not match the function's parameter types");
+
+      // Guarded so that a mismatched chain reports the assertions above and
+      // nothing else: instantiating the body too would bury them in cascading
+      // conversion errors.
+      if constexpr (std::is_same_v<std::tuple<Ds...>, std::tuple<Args...>>) {
+        bind(f, std::move(description));
+      }
+    }
+
     // The argument labels, in declaration order, with a default for unlabelled
     // slots. Only the argument segments contribute.
     std::vector<std::string> argument_labels() const {
@@ -229,7 +268,9 @@ public:
 
     // Register the route, type-erasing `callable` behind a move_only_function
     // that turns the matched argument tokens into typed values and invokes it.
-    template <typename F> void bind(F callable) const {
+    template <typename F>
+    void bind(F callable,
+              std::optional<std::string> description = std::nullopt) const {
       std::size_t literals = 0;
       for (const auto &segment : pattern_) {
         if (!segment.is_argument)
@@ -237,7 +278,7 @@ public:
       }
 
       dispatcher_->add_route(
-          Route{pattern_, build_usage(), literals,
+          Route{pattern_, build_usage(), literals, std::move(description),
                 make_invoker(std::move(callable), argument_labels())});
     }
 
@@ -322,6 +363,8 @@ public:
   // each consume one token.
   int dispatch(std::span<const char *const> args) const {
     const char *program = args.size() > 0 ? args[0] : "program";
+    current_program_ = program;
+    register_builtin_commands();
     const std::vector<std::string_view> tokens =
         args.subspan(1) | std::views::transform([](const char *c) {
           return std::string_view(c);
@@ -384,6 +427,13 @@ public:
     return dispatch(std::span<char *>(argv, argc));
   }
 
+  // Prints the same header line print_usage() would, on its own: "{program
+  // name} {version (optional)} - {description (optional)}". This is what the
+  // auto-generated "--version" command prints.
+  void print_version(const char *program) const {
+    std::println("{}", header_line(program));
+  }
+
   void print_usage(const char *program) const {
     auto program_name = program_name_.value_or(program);
     if (usage_string_) {
@@ -400,13 +450,9 @@ public:
 
     auto ss = std::ostringstream{};
 
-    // Header: {program_name} {version (optional)} - {description (optional)}
-    ss << std::format("{}", program_name);
-    if (version_) {
-      ss << std::format(" {}", *version_);
-    }
+    ss << header_line(program);
     if (description_) {
-      ss << std::format(" - {}\n\n", *description_);
+      ss << "\n\n";
     }
 
     // Format the usage text
@@ -417,9 +463,16 @@ public:
       ss << std::format("COMMANDS:\n");
       for (const auto &route : routes_) {
         // The empty pattern has nothing to spell out, but still needs a line.
-        ss << std::format(
-            "    {}\n",
-            ((route.usage.empty()) ? "(no arguments)" : route.usage.c_str()));
+        if (route.description) {
+          ss << std::format(
+              "    {} - {}\n",
+              ((route.usage.empty()) ? "(no arguments)" : route.usage.c_str()),
+              *route.description);
+        } else {
+          ss << std::format(
+              "    {}\n",
+              ((route.usage.empty()) ? "(no arguments)" : route.usage.c_str()));
+        }
       }
       std::println("{}", ss.str());
       return;
@@ -427,11 +480,16 @@ public:
 
     // Single route
     if (routes_.size() == 1) {
-      if (routes_.front().usage.empty()) {
-        ss << std::format("USAGE:\n    {}\n", program);
+      const auto &route = routes_.front();
+      if (route.usage.empty()) {
+        ss << std::format("USAGE:\n    {}", program);
       } else {
-        ss << std::format("USAGE:\n    {} {}", program, routes_.front().usage);
+        ss << std::format("USAGE:\n    {} {}", program, route.usage);
       }
+      if (route.description) {
+        ss << std::format(" - {}", *route.description);
+      }
+      ss << "\n";
       std::println("{}", ss.str());
       return;
     }
@@ -440,11 +498,63 @@ public:
     ss << std::format("USAGE:\n");
     for (const auto &route : routes_) {
       ss << std::format("    {} {}", program, route.usage);
+      if (route.description) {
+        ss << std::format(" - {}", *route.description);
+      }
     }
   }
 
 private:
   Builder<> root() { return Builder<>(this, std::vector<Segment>{}); }
+
+  // Registers "--help" and "--version" as ordinary routes, each a single
+  // literal segment with no arguments, unless a route with that same shape
+  // is already registered (by the user, or by a previous dispatch() call).
+  //
+  // Skipped entirely for an argument-led or bare dispatcher: a leading
+  // literal there would be ambiguous with (or steal) an actual argument, the
+  // same conflict add_route() rejects for any other literal-led command.
+  void register_builtin_commands() const {
+    if (!routes_.empty() && !has_literal_commands())
+      return;
+
+    register_builtin_command("--help", "prints this help message",
+                             [this](std::span<const std::string_view>) {
+                               print_usage(current_program_);
+                               return exit_ok;
+                             });
+    register_builtin_command("--version", "prints version information",
+                             [this](std::span<const std::string_view>) {
+                               print_version(current_program_);
+                               return exit_ok;
+                             });
+  }
+
+  void register_builtin_command(
+      std::string name, std::string description,
+      std::move_only_function<int(std::span<const std::string_view>) const>
+          invoke) const {
+    std::vector<Segment> pattern{Segment{false, name}};
+    for (const auto &existing : routes_) {
+      if (same_shape(existing.pattern, pattern))
+        return;
+    }
+    routes_.push_back(Route{std::move(pattern), name, /*literal_count=*/1,
+                            std::move(description), std::move(invoke)});
+  }
+
+  // "{program_name} {version (optional)} - {description (optional)}"
+  std::string header_line(const char *program) const {
+    auto program_name = program_name_.value_or(program);
+    std::string header = std::format("{}", program_name);
+    if (version_) {
+      header += std::format(" {}", *version_);
+    }
+    if (description_) {
+      header += std::format(" - {}", *description_);
+    }
+    return header;
+  }
 
   static bool leads_with_literal(const std::vector<Segment> &pattern) {
     return !pattern.empty() && !pattern.front().is_argument;

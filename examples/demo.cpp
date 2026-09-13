@@ -57,18 +57,18 @@ int main(int argc, char **argv) {
   dispatcher.literal("get_gcd")
     .and_then<int>() // unlabelled: shows up as <int>
     .and_then<int>()
-    .executes(gcd);
+    .executes(gcd, "calculates the greatest common divisor of two integers");
 
   dispatcher.literal("greet")
     .and_then<std::string_view>("name")
     .and_then<int>("times")
     .and_then<bool>("loud")
-    .executes(greet);
+    .executes(greet, "greets a person a number of times, optionally loudly");
 
   dispatcher.literal("run")
     .and_then<Mode>("mode")
     .and_then<int>("n")
-    .executes(run);
+    .executes(run, "runs a mode with a given integer parameter");
 
   // Lambdas work anywhere a function does. A captureless one, checked against
   // the chain exactly as a named function would be:
@@ -76,7 +76,8 @@ int main(int argc, char **argv) {
     .and_then<int>("x")
     .and_then<int>("y")
     .executes(
-      [](int x, int y) { return x * y; }
+      [](int x, int y) { return x * y; },
+      "multiplies two integers"
     );
 
   // Capturing lambdas are fine too - the closure is stored with the command.
@@ -85,7 +86,8 @@ int main(int argc, char **argv) {
     .and_then<std::string_view>("message")
     .executes(
       [prefix](std::string_view message) -> void {
-        std::println("{} {}", prefix, message); }
+        std::println("{} {}", prefix, message); },
+      "prints a message with a prefix"
     );
 
   // And a generic lambda, where operator() is a template: the and_then<> chain
@@ -93,7 +95,10 @@ int main(int argc, char **argv) {
   dispatcher.literal("add")
     .and_then<double>("lhs")
     .and_then<double>("rhs")
-    .executes([](auto lhs, auto rhs) { return lhs + rhs; });
+    .executes(
+        [](auto lhs, auto rhs) { return lhs + rhs; },
+        "adds two floating-point numbers"
+    );
 
   // Branching. The builder is a value, so a shared prefix can be declared once
   // and fanned out with literal() - here `device <name>` is common to both:
@@ -103,19 +108,27 @@ int main(int argc, char **argv) {
     .and_then<std::string_view>("name");
 
   device.literal("info")
-    .executes(device_info);
+    .executes(
+        device_info,
+        "logs device information"
+    );
 
   device.literal("set")
     .and_then<Status>("status")
-    .executes(device_set_status);
+    .executes(
+        device_set_status,
+        "sets the device status"
+    );
 
   device.literal("enable")
     .executes(
-      [](auto name) { return device_set_status(name, Status::up); }
+      [](auto name) { return device_set_status(name, Status::up); },
+      "enables the device"
     );
   device.literal("disable")
     .executes(
-      [](auto name) { return device_set_status(name, Status::down); }
+      [](auto name) { return device_set_status(name, Status::down); },
+      "disables the device"
     );
 
   // Branching does not need an extra literal: the same name with different
@@ -124,11 +137,15 @@ int main(int argc, char **argv) {
   //   ./demo status eth0
   auto status = dispatcher.literal("status");
 
-  status.executes([] { std::println("all devices nominal"); });
+  status.executes(
+      [] { std::println("all devices nominal"); },
+      "logs the status of all devices"
+  );
 
   status.and_then<std::string_view>("name")
     .executes(
-      [](std::string_view name) { std::println("{} nominal", name); }
+      [](std::string_view name) { std::println("{} nominal", name); },
+      "logs the status of a single device"
     );
   // clang-format on
 
