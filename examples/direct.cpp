@@ -6,7 +6,6 @@
 // argument rather than a command name. Everything else works identically (type
 // names, enum parsing, lambda targets).
 #include <print>
-#include <string_view>
 
 #include <argdispatch/argdispatch.hpp>
 
@@ -18,7 +17,14 @@ void report(int width, int height, Mode mode) {
 }
 
 int main(int argc, char **argv) {
-  argdispatch::ArgDispatcher dispatcher;
+  // clang-format off
+  argdispatch::ArgDispatcher dispatcher({
+      .program_name = "DispatcherDemoDirect",
+      .version      = "1.0",
+      .description  = "demonstrates argdispatch's command dispatching, without "
+                      "explicit command names or branching",
+  });
+  // clang-format on
 
   dispatcher.and_then<int>("width")
       .and_then<int>("height")

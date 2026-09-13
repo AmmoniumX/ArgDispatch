@@ -21,9 +21,11 @@
 #include <cstddef>
 #include <format>
 #include <functional>
+#include <optional>
 #include <print>
 #include <ranges>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -36,6 +38,10 @@
 #include "reflect.hpp"
 
 namespace argdispatch {
+
+template <class... Ts> struct overloaded : Ts... {
+  using Ts::operator()...;
+};
 
 // Exit codes returned by ArgDispatcher::parse.
 inline constexpr int exit_ok = 0;
@@ -60,8 +66,45 @@ class ArgDispatcher {
   };
 
   std::vector<Route> routes_;
+  std::optional<std::string> program_name_;
+  std::optional<std::string> version_;
+  std::optional<std::string> description_;
 
 public:
+  struct Options {
+    std::optional<std::string> program_name;
+    std::optional<std::string> version;
+    std::optional<std::string> description;
+  };
+
+  using CompleteUsageString = std::string;
+
+  using TemplateUsageString = std::format_string<std::string_view>;
+
+  struct UsageString {
+    std::variant<CompleteUsageString, TemplateUsageString> value;
+  };
+  std::optional<UsageString> usage_string_;
+
+  explicit ArgDispatcher() noexcept = default;
+
+  // Construct a dispatcher with optional metadata for usage text generation.
+  // - If "program_name" is not provided, it will be inferred from
+  //   argv[0] during dispatch.
+  // - If "version" or "description" are not provided, they will be omitted from
+  //   the usage text.
+  explicit ArgDispatcher(Options options) noexcept
+      : program_name_(std::move(options.program_name)),
+        version_(std::move(options.version)),
+        description_(std::move(options.description)) {}
+
+  // Construct a dispatcher with a custom usage string.
+  // - The "usage_string" can be a complete, pre-formatted usage message, or a
+  //   format string that takes one string_view argument (the program name),
+  //   in which case it will be inferred from argv[0] during dispatch.
+  explicit ArgDispatcher(UsageString usage_string) noexcept
+      : usage_string_(std::move(usage_string)) {}
+
   // Accumulates a command pattern. Ds... are the argument types declared so
   // far, in order; they line up with the argument segments in pattern_.
   //
@@ -342,30 +385,61 @@ public:
   }
 
   void print_usage(const char *program) const {
+    auto program_name = program_name_.value_or(program);
+    if (usage_string_) {
+      std::visit(
+          overloaded{
+              [&](const CompleteUsageString &s) { std::println("{}", s); },
+              [&](const TemplateUsageString &s) {
+                std::println(s, std::string_view(program_name));
+              },
+          },
+          usage_string_->value);
+      return;
+    }
+
+    auto ss = std::ostringstream{};
+
+    // Header: {program_name} {version (optional)} - {description (optional)}
+    ss << std::format("{}", program_name);
+    if (version_) {
+      ss << std::format(" {}", *version_);
+    }
+    if (description_) {
+      ss << std::format(" - {}\n\n", *description_);
+    }
+
+    // Format the usage text
+
+    // Literal commands: print each command on its own line
     if (has_literal_commands()) {
-      std::println("usage: {} <command> [args...]", program);
-      std::println("");
-      std::println("commands:");
+      ss << std::format("USAGE:\n    {} <COMMAND> [ARGS...]\n\n", program);
+      ss << std::format("COMMANDS:\n");
       for (const auto &route : routes_) {
         // The empty pattern has nothing to spell out, but still needs a line.
-        std::println("  {}",
-                     route.usage.empty() ? "(no arguments)" : route.usage);
+        ss << std::format(
+            "    {}\n",
+            ((route.usage.empty()) ? "(no arguments)" : route.usage.c_str()));
       }
+      std::println("{}", ss.str());
       return;
     }
 
+    // Single route
     if (routes_.size() == 1) {
       if (routes_.front().usage.empty()) {
-        std::println("usage: {}", program);
+        ss << std::format("USAGE:\n    {}\n", program);
       } else {
-        std::println("usage: {} {}", program, routes_.front().usage);
+        ss << std::format("USAGE:\n    {} {}", program, routes_.front().usage);
       }
+      std::println("{}", ss.str());
       return;
     }
 
-    std::println("usage:");
+    // Multiple routes, no literal commands
+    ss << std::format("USAGE:\n");
     for (const auto &route : routes_) {
-      std::println("  {} {}", program, route.usage);
+      ss << std::format("    {} {}", program, route.usage);
     }
   }
 

@@ -47,9 +47,13 @@ void run(Mode mode, int n) {
 }
 
 int main(int argc, char **argv) {
-  argdispatch::ArgDispatcher dispatcher;
-
   // clang-format off
+  argdispatch::ArgDispatcher dispatcher({
+      .program_name   = "DispatcherDemo",
+      .version        = "1.0",
+      .description    = "demonstrates argdispatch's command dispatch and branching"
+  });
+
   dispatcher.literal("get_gcd")
     .and_then<int>() // unlabelled: shows up as <int>
     .and_then<int>()
