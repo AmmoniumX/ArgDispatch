@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
       .and_then<int>("b")
       .executes(gcd);
 
-  return dispatcher.dispatch(argc, argv);
+  return dispatcher.build().dispatch(argc, argv);
 }
 ```
 
@@ -114,7 +114,7 @@ dispatcher.and_then<int>("width")
     .and_then<Mode>("mode")
     .executes(report);
 
-return dispatcher.dispatch(argc, argv);
+return dispatcher.build().dispatch(argc, argv);
 ```
 
 ```console

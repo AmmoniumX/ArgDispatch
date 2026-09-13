@@ -149,5 +149,5 @@ int main(int argc, char **argv) {
     );
   // clang-format on
 
-  return dispatcher.dispatch(argc, argv);
+  return dispatcher.build().dispatch(argc, argv);
 }

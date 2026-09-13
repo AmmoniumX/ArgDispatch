@@ -359,13 +359,21 @@ public:
     root().executes(std::forward<F>(callable));
   }
 
+  // Called once after all commands have been registered, to add the built-in
+  // "--help" and "--version" commands
+  // Returns a const reference, to imply that no more commands should be
+  // registered after this point.
+  const auto &build() {
+    autoregister_builtin_commands();
+    return *this;
+  }
+
   // Match the tokens after the program name against the registered patterns and
   // run the best fit. Literal segments must match exactly; argument segments
   // each consume one token.
   int dispatch(std::span<const char *const> args) const {
     const char *program = args.size() > 0 ? args[0] : "program";
     current_program_ = program;
-    autoregister_builtin_commands();
     const std::vector<std::string_view> tokens =
         args.subspan(1) | std::views::transform([](const char *c) {
           return std::string_view(c);
@@ -506,7 +514,7 @@ public:
   }
 
   // Registers "--help" and "--version" as ordinary routes
-  void register_builtin_commands() const {
+  auto &register_builtin_commands() {
 
     register_builtin_command("--help", "prints this help message",
                              [this](std::span<const std::string_view>) {
@@ -518,6 +526,7 @@ public:
                                print_version(current_program_);
                                return exit_ok;
                              });
+    return *this;
   }
 
 private:
@@ -530,7 +539,7 @@ private:
   // Skipped entirely for an argument-led or bare dispatcher: a leading
   // literal there would be ambiguous with (or steal) an actual argument, the
   // same conflict add_route() rejects for any other literal-led command.
-  void autoregister_builtin_commands() const {
+  void autoregister_builtin_commands() {
     if (!routes_.empty() && !has_literal_commands())
       return;
     register_builtin_commands();
@@ -539,7 +548,7 @@ private:
   void register_builtin_command(
       std::string name, std::string description,
       std::move_only_function<int(std::span<const std::string_view>) const>
-          invoke) const {
+          invoke) {
     std::vector<Segment> pattern{Segment{false, name}};
     for (const auto &existing : routes_) {
       if (same_shape(existing.pattern, pattern))
