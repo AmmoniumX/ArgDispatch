@@ -95,7 +95,8 @@ struct Segment {
 };
 
 // "device <name:std::string_view> increment <amount:int>"
-inline std::string build_usage_(std::span<const TypeNameMeta> types,
+inline std::string build_usage_(std::span<const char *const> types,
+                                std::span<const bool> displays,
                                 std::span<const Segment> pattern) {
   std::string usage;
   std::size_t argument = 0;
@@ -105,14 +106,14 @@ inline std::string build_usage_(std::span<const TypeNameMeta> types,
     if (segment.is_argument()) {
       const auto &label = std::get<Segment::Argument>(segment.data).label;
       if (!label.empty()) {
-        if (types[argument].show) {
-          usage += std::format("<{}:{}>", label, types[argument].name);
+        if (displays[argument]) {
+          usage += std::format("<{}:{}>", label, types[argument]);
         } else {
           usage += std::format("<{}>", label);
         }
         ++argument;
       } else {
-        usage += std::format("<{}>", types[argument++].name);
+        usage += std::format("<{}>", types[argument++]);
       }
     } else {
       usage += std::get<Segment::Literal>(segment.data).display();
@@ -338,8 +339,10 @@ public:
     }
 
     std::string build_usage() const {
-      const std::array<TypeNameMeta, sizeof...(Ds)> types{type_name<Ds>...};
-      return build_usage_(types, pattern_);
+      const std::array<const char *const, sizeof...(Ds)> types{
+          type_name<Ds>...};
+      const std::array<bool, sizeof...(Ds)> displays{display_type_name_v<Ds>...};
+      return build_usage_(types, displays, pattern_);
     }
 
     // Register the route, type-erasing `callable` behind a move_only_function
@@ -511,9 +514,9 @@ public:
       std::println("compdef {} {}", function_name, shell_quote(name));
     } else if (shell == "fish") {
       for (const auto &candidate : candidates) {
-        std::string line = std::format(
-            "complete -c {} -f -n '__fish_use_subcommand' -a {}",
-            shell_quote(name), shell_quote(candidate.name));
+        std::string line =
+            std::format("complete -c {} -f -n '__fish_use_subcommand' -a {}",
+                        shell_quote(name), shell_quote(candidate.name));
         if (candidate.description)
           line += std::format(" -d {}", shell_quote(*candidate.description));
         std::println("{}", line);
@@ -728,7 +731,7 @@ public:
       if (same_shape(existing.pattern, pattern))
         return *this;
     }
-    std::string usage = build_usage_({}, pattern);
+    std::string usage = build_usage_({}, {}, pattern);
     routes_.push_back(Route{std::move(pattern), std::move(usage),
                             /*literal_count=*/2, std::move(description),
                             /*invoke=*/nullptr, Route::Kind::Completions});
@@ -763,7 +766,7 @@ private:
       if (same_shape(existing.pattern, pattern))
         return;
     }
-    std::string usage = build_usage_({}, pattern);
+    std::string usage = build_usage_({}, {}, pattern);
     routes_.push_back(Route{std::move(pattern), std::move(usage),
                             /*literal_count=*/1, std::move(description),
                             /*invoke=*/nullptr, kind});

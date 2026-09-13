@@ -40,18 +40,18 @@
 
 namespace argdispatch {
 
-struct TypeNameMeta {
-  const char *name;
-  bool show;
-};
+template <typename T> struct display_type_name : std::true_type {};
+
+template <typename T>
+inline constexpr bool display_type_name_v = display_type_name<T>::value;
 
 #if ARGDISPATCH_HAS_REFLECTION
 
 // A displayable spelling of T, e.g. "int" or "Mode". Without reflection this
 // would need a hand-maintained trait specialised for every supported type.
 template <typename T>
-constexpr TypeNameMeta type_name = {
-    std::define_static_string(std::meta::display_string_of(^^T)), true};
+constexpr const char *type_name =
+    std::define_static_string(std::meta::display_string_of(^^T));
 
 // type_name specialization for string and string_view
 //
@@ -59,12 +59,35 @@ constexpr TypeNameMeta type_name = {
 // name in usage and error text.
 // Don't display string or string_view in usage text, those are assumed
 // "default"
+template <> inline constexpr const char *type_name<std::string_view> = "string";
 template <>
-inline constexpr TypeNameMeta type_name<std::string_view> = {"string", false};
-template <>
-inline constexpr TypeNameMeta type_name<std::string> = {"string", false};
+inline constexpr const char *type_name<std::string> = "string";
+
+// You can also specialize display_type_name<T> to false to suppress a type's
+// name in usage text, e.g. for std::string and std::string_view above.
+template <> struct display_type_name<std::string_view> : std::false_type {};
+template <> struct display_type_name<std::string> : std::false_type {};
 
 #else // !ARGDISPATCH_HAS_REFLECTION
+
+// An enum's name, copied out of magic_enum's std::string_view into static
+// storage so it can be handed out as a null-terminated const char*.
+template <typename E>
+  requires std::is_enum_v<E>
+inline constexpr auto enum_type_name_storage = [] {
+  constexpr auto name = magic_enum::enum_type_name<E>();
+  std::array<char, name.size() + 1> chars{};
+  for (std::size_t i = 0; i < name.size(); ++i)
+    chars[i] = name[i];
+  return chars;
+}();
+
+template <typename T> constexpr const char *type_name_of() {
+  if constexpr (std::is_enum_v<T>)
+    return enum_type_name_storage<T>.data();
+  else
+    return "value";
+}
 
 // Without reflection there is no way to spell an arbitrary type's name at
 // compile time. An enum gets its name from magic_enum automatically;
@@ -72,45 +95,34 @@ inline constexpr TypeNameMeta type_name<std::string> = {"string", false};
 // type_name<T> to name your own non-enum types, the same way std::string
 // and std::string_view are named below.
 template <typename T>
-inline constexpr TypeNameMeta type_name = [] -> TypeNameMeta {
-  if constexpr (std::is_enum_v<T>) {
-    return {magic_enum::enum_type_name<T>().data(), true};
-  } else {
-    return {"value", true};
-  }
-}();
+inline constexpr const char *type_name = type_name_of<T>();
 
-template <> inline constexpr TypeNameMeta type_name<bool> = {"bool", true};
-template <> inline constexpr TypeNameMeta type_name<char> = {"char", true};
+template <> inline constexpr const char *type_name<bool> = "bool";
+template <> inline constexpr const char *type_name<char> = "char";
+template <> inline constexpr const char *type_name<signed char> = "signed char";
 template <>
-inline constexpr TypeNameMeta type_name<signed char> = {"signed char", true};
+inline constexpr const char *type_name<unsigned char> = "unsigned char";
+template <> inline constexpr const char *type_name<short> = "short";
 template <>
-inline constexpr TypeNameMeta type_name<unsigned char> = {"unsigned char",
-                                                          true};
-template <> inline constexpr TypeNameMeta type_name<short> = {"short", true};
+inline constexpr const char *type_name<unsigned short> = "unsigned short";
+template <> inline constexpr const char *type_name<int> = "int";
 template <>
-inline constexpr TypeNameMeta type_name<unsigned short> = {"unsigned short",
-                                                           true};
-template <> inline constexpr TypeNameMeta type_name<int> = {"int", true};
+inline constexpr const char *type_name<unsigned int> = "unsigned int";
+template <> inline constexpr const char *type_name<long> = "long";
 template <>
-inline constexpr TypeNameMeta type_name<unsigned int> = {"unsigned int", true};
-template <> inline constexpr TypeNameMeta type_name<long> = {"long", true};
+inline constexpr const char *type_name<unsigned long> = "unsigned long";
+template <> inline constexpr const char *type_name<long long> = "long long";
 template <>
-inline constexpr TypeNameMeta type_name<unsigned long> = {"unsigned long",
-                                                          true};
-template <>
-inline constexpr TypeNameMeta type_name<long long> = {"long long", true};
-template <>
-inline constexpr TypeNameMeta type_name<unsigned long long> = {
-    "unsigned long long", true};
-template <> inline constexpr TypeNameMeta type_name<float> = {"float", true};
-template <> inline constexpr TypeNameMeta type_name<double> = {"double", true};
-template <>
-inline constexpr TypeNameMeta type_name<long double> = {"long double", true};
-template <>
-inline constexpr TypeNameMeta type_name<std::string_view> = {"string", false};
-template <>
-inline constexpr TypeNameMeta type_name<std::string> = {"string", false};
+inline constexpr const char *type_name<unsigned long long> =
+    "unsigned long long";
+template <> inline constexpr const char *type_name<float> = "float";
+template <> inline constexpr const char *type_name<double> = "double";
+template <> inline constexpr const char *type_name<long double> = "long double";
+template <> inline constexpr const char *type_name<std::string_view> = "string";
+template <> inline constexpr const char *type_name<std::string> = "string";
+
+template <> struct display_type_name<std::string_view> : std::false_type {};
+template <> struct display_type_name<std::string> : std::false_type {};
 
 #endif // ARGDISPATCH_HAS_REFLECTION
 
