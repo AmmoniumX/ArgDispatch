@@ -607,14 +607,23 @@ public:
     std::println("{}", ss.str());
   }
 
-  // Registers "--help" and "--version" as ordinary routes
-  auto &register_builtin_commands() {
-    register_builtin_command("--help", "prints this help message",
+  auto &register_help(std::initializer_list<std::string> aliases = {"--help"},
+                      std::string description = "prints this help message") {
+    register_builtin_command(aliases.begin()->c_str(), std::move(description),
                              Route::Kind::Help);
-    register_builtin_command("--version", "prints version information",
+    return *this;
+  }
+
+  auto &
+  register_version(std::initializer_list<std::string> aliases = {"--version"},
+                   std::string description = "prints version information") {
+    register_builtin_command(aliases.begin()->c_str(), std::move(description),
                              Route::Kind::Version);
     return *this;
   }
+
+  // Registers "--help" and "--version" as ordinary routes
+  auto &register_all_builtins() { return register_help().register_version(); }
 
 private:
   Builder<> root() { return Builder<>(this, std::vector<Segment>{}); }
@@ -629,7 +638,7 @@ private:
   void autoregister_builtin_commands() {
     if (!routes_.empty() && !has_literal_commands())
       return;
-    register_builtin_commands();
+    register_all_builtins();
   }
 
   void register_builtin_command(std::string name, std::string description,
@@ -640,8 +649,7 @@ private:
         return;
     }
     routes_.push_back(Route{std::move(pattern), name, /*literal_count=*/1,
-                            std::move(description), /*invoke=*/nullptr,
-                            kind});
+                            std::move(description), /*invoke=*/nullptr, kind});
   }
 
   // "{program_name} {version (optional)} - {description (optional)}"
