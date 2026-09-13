@@ -530,14 +530,13 @@ public:
   // name} {version (optional)} - {description (optional)}". This is what the
   // auto-generated "--version" command prints.
   void print_version(const char *program) const {
-    auto p = std::filesystem::path(program).filename();
-    program = p.c_str();
-    std::println("{}", header_line(program));
+    auto name = program_basename(program);
+    std::println("{}", header_line(name.c_str()));
   }
 
   void print_usage(const char *program) const {
-    auto p = std::filesystem::path(program).filename();
-    program = p.c_str();
+    auto name = program_basename(program);
+    program = name.c_str();
     auto program_name =
         program_name_.transform([](auto &pn) { return pn.c_str(); })
             .value_or(program);
@@ -656,6 +655,17 @@ private:
       header += std::format(" - {}", *description_);
     }
     return header;
+  }
+
+  // Best-effort basename of argv[0], for the header line and usage text.
+  // Falls back to "program" verbatim if it can't be parsed as a filesystem
+  // path (e.g. an unusual encoding) for any reason.
+  static std::string program_basename(const char *program) {
+    try {
+      return std::filesystem::path(program).filename().string();
+    } catch (const std::exception &) {
+      return program;
+    }
   }
 
   static bool leads_with_literal(const std::vector<Segment> &pattern) {
