@@ -718,6 +718,203 @@ void test_arguments_are_positional() {
            argdispatch::exit_args, "labels are not flags");
 }
 
+// ----------------------------------------------------------------- flags
+
+void test_presence_flag() {
+  argdispatch::ArgDispatcher dispatcher;
+  static bool got_verbose = false;
+  dispatcher.flag("--verbose").literal("go").executes(
+      [](bool verbose) { got_verbose = verbose; });
+
+  got_verbose = false;
+  check_eq(run(dispatcher, {"prog", "go"}), argdispatch::exit_ok,
+           "presence flag absent");
+  check(!got_verbose, "presence flag defaults to false");
+
+  got_verbose = false;
+  check_eq(run(dispatcher, {"prog", "--verbose", "go"}), argdispatch::exit_ok,
+           "presence flag before the command");
+  check(got_verbose, "presence flag set from before the literal");
+
+  got_verbose = false;
+  check_eq(run(dispatcher, {"prog", "go", "--verbose"}), argdispatch::exit_ok,
+           "presence flag after the command");
+  check(got_verbose, "presence flag set from after the literal");
+}
+
+void test_flag_aliases() {
+  argdispatch::ArgDispatcher dispatcher;
+  static bool got_verbose = false;
+  dispatcher.flag({"--verbose", "-v"}).literal("go").executes(
+      [](bool verbose) { got_verbose = verbose; });
+
+  got_verbose = false;
+  check_eq(run(dispatcher, {"prog", "go", "-v"}), argdispatch::exit_ok,
+           "short alias recognized");
+  check(got_verbose, "short alias set the flag");
+}
+
+void test_valued_flag_with_default() {
+  argdispatch::ArgDispatcher dispatcher;
+  static int got_level = -1;
+  dispatcher.flag<int>("--level", 1).literal("build").executes(
+      [](int level) { got_level = level; });
+
+  got_level = -1;
+  check_eq(run(dispatcher, {"prog", "build"}), argdispatch::exit_ok,
+           "default flag value used when absent");
+  check_eq(got_level, 1, "default value applied");
+
+  got_level = -1;
+  check_eq(run(dispatcher, {"prog", "--level", "5", "build"}),
+           argdispatch::exit_ok, "flag with explicit value");
+  check_eq(got_level, 5, "explicit value overrides default");
+
+  got_level = -1;
+  check_eq(run(dispatcher, {"prog", "build", "--level=9"}),
+           argdispatch::exit_ok, "--flag=value syntax");
+  check_eq(got_level, 9, "inline =value parsed");
+}
+
+void test_valued_flag_without_default() {
+  argdispatch::ArgDispatcher dispatcher;
+  static std::optional<int> got;
+  dispatcher.flag<int>("--level").literal("build").executes(
+      [](std::optional<int> level) { got = level; });
+
+  got.reset();
+  check_eq(run(dispatcher, {"prog", "build"}), argdispatch::exit_ok,
+           "absent valued flag with no default");
+  check(!got.has_value(), "absent valued flag is nullopt");
+
+  check_eq(run(dispatcher, {"prog", "--level", "7", "build"}),
+           argdispatch::exit_ok, "present valued flag with no default");
+  check(got.has_value() && *got == 7, "present valued flag parsed");
+}
+
+void test_flag_inherited_across_branches() {
+  argdispatch::ArgDispatcher dispatcher;
+  static std::string flag_trace;
+
+  // Declared before the branch point, so both "info" and "increment" inherit
+  // it without redeclaring it themselves.
+  auto device =
+      dispatcher.flag("--verbose").literal("device").and_then<std::string_view>(
+          "name");
+  device.literal("info").executes([](bool verbose, std::string_view name) {
+    flag_trace = std::format("info:{}:{}", verbose, name);
+  });
+  device.literal("increment")
+      .and_then<int>("amount")
+      .executes([](bool verbose, std::string_view name, int amount) {
+        flag_trace = std::format("inc:{}:{}:{}", verbose, name, amount);
+      });
+
+  flag_trace.clear();
+  check_eq(run(dispatcher, {"prog", "--verbose", "device", "eth0", "info"}),
+           argdispatch::exit_ok, "inherited flag reaches the first branch");
+  check_eq(flag_trace, "info:true:eth0",
+           "inherited flag set on the first branch");
+
+  flag_trace.clear();
+  check_eq(
+      run(dispatcher, {"prog", "device", "eth0", "increment", "5"}),
+      argdispatch::exit_ok, "inherited flag reaches the second branch too");
+  check_eq(flag_trace, "inc:false:eth0:5",
+           "inherited flag defaults to false on the second branch");
+
+  // A flag inherited from a shared prefix may appear anywhere in the line,
+  // not just before the prefix.
+  flag_trace.clear();
+  check_eq(run(dispatcher, {"prog", "device", "eth0", "--verbose", "info"}),
+           argdispatch::exit_ok, "inherited flag recognized mid-line");
+  check_eq(flag_trace, "info:true:eth0", "flag applied regardless of position");
+}
+
+void test_flag_scoped_to_one_branch() {
+  argdispatch::ArgDispatcher dispatcher;
+  static bool ran_loud = false;
+  static bool loud_value = false;
+  static bool ran_quiet = false;
+
+  // "base" itself carries no flags; only the branch that calls .flag() does.
+  auto base = dispatcher.literal("shout");
+  base.flag("--loud").executes([](bool loud) {
+    ran_loud = true;
+    loud_value = loud;
+  });
+  base.literal("quiet").executes([] { ran_quiet = true; });
+
+  ran_loud = ran_quiet = false;
+  check_eq(run(dispatcher, {"prog", "shout", "--loud"}), argdispatch::exit_ok,
+           "flag declared on this branch is recognized");
+  check(ran_loud && loud_value, "flag branch ran with the flag set");
+
+  ran_loud = false;
+  check_eq(run(dispatcher, {"prog", "shout"}), argdispatch::exit_ok,
+           "flag branch also runs without the flag");
+  check(ran_loud && !loud_value, "presence flag defaults to false when absent");
+
+  // The flag is local to the first branch: on the sibling branch, the same
+  // token is just an unrecognized extra token, so neither pattern's shape
+  // matches.
+  check_eq(run(dispatcher, {"prog", "shout", "quiet", "--loud"}),
+           argdispatch::exit_args,
+           "a flag declared on one branch is not usable on a sibling");
+}
+
+void test_flag_missing_value_rejected() {
+  argdispatch::ArgDispatcher dispatcher;
+  dispatcher.flag<int>("--level", 1).literal("build").executes(
+      [](int) {});
+
+  check_eq(run(dispatcher, {"prog", "build", "--level"}),
+           argdispatch::exit_args,
+           "a valued flag with no following value is rejected");
+}
+
+void test_presence_flag_rejects_inline_value() {
+  argdispatch::ArgDispatcher dispatcher;
+  dispatcher.flag("--verbose").literal("go").executes([](bool) {});
+
+  check_eq(run(dispatcher, {"prog", "go", "--verbose=true"}),
+           argdispatch::exit_args,
+           "a presence flag does not accept an inline =value");
+}
+
+void test_flag_registration_validation() {
+  bool threw = false;
+  try {
+    argdispatch::ArgDispatcher dispatcher;
+    dispatcher.flag("verbose");
+  } catch (const std::logic_error &) {
+    threw = true;
+  }
+  check(threw, "a flag name without a leading '-' is rejected");
+
+  threw = false;
+  try {
+    argdispatch::ArgDispatcher dispatcher;
+    dispatcher.flag("--dup").literal("a").flag("--dup").executes(
+        [](bool, bool) {});
+  } catch (const std::logic_error &) {
+    threw = true;
+  }
+  check(threw, "a duplicate flag name within one chain is rejected");
+
+  threw = false;
+  try {
+    argdispatch::ArgDispatcher dispatcher;
+    dispatcher.flag("--x").literal("a").executes([](bool) {});
+    dispatcher.flag("--x").literal("b").executes([](bool) {});
+  } catch (const std::logic_error &) {
+    threw = true;
+  }
+  check(!threw,
+        "the same flag name in two unrelated chains is fine (independent "
+        "copies)");
+}
+
 // ------------------------------------------------------------- completions
 
 // Redirects stdout to a temp file for the duration of "fn" and returns what
@@ -830,6 +1027,62 @@ void test_register_completions_validates_shells() {
   check(threw, "an empty shell list is rejected at registration time");
 }
 
+void test_flags_shown_in_usage_text() {
+  argdispatch::ArgDispatcher dispatcher;
+  dispatcher.flag("--verbose").literal("go").executes([](bool) {});
+  dispatcher.flag<int>("--level", 1).literal("build").executes([](int) {});
+  dispatcher.flag<int>("--tag").literal("show").executes(
+      [](std::optional<int>) {});
+
+  auto usage = capture_stdout([&] { dispatcher.print_usage("prog"); });
+  check(usage.find("go [--verbose]") != std::string::npos,
+        "usage text shows a presence flag");
+  check(usage.find("build [--level <int>]") != std::string::npos,
+        "usage text shows a valued flag with a default and its type");
+  check(usage.find("show [--tag <int>]") != std::string::npos,
+        "usage text shows a valued flag without a default the same way");
+}
+
+void test_flags_shown_in_completions() {
+  argdispatch::ArgDispatcher dispatcher;
+  dispatcher.register_shell_completions();
+  auto device = dispatcher.flag("--verbose").literal("device");
+  device.literal("info").executes([](bool) {});
+  device.literal("reset").executes([](bool) {});
+  dispatcher.flag<int>("--level", 1).literal("build").executes([](int) {});
+
+  auto bash =
+      capture_stdout([&] { dispatcher.print_completions("prog", "bash"); });
+  check(bash.find("_node_flags") != std::string::npos &&
+            bash.find("--verbose") != std::string::npos &&
+            bash.find("--level") != std::string::npos,
+        "bash completions declare a node-to-flags map covering both flags");
+
+  auto zsh =
+      capture_stdout([&] { dispatcher.print_completions("prog", "zsh"); });
+  check(zsh.find("_node_flags") != std::string::npos &&
+            zsh.find("--verbose") != std::string::npos &&
+            zsh.find("--level") != std::string::npos,
+        "zsh completions declare a node-to-flags map covering both flags");
+
+  auto fish =
+      capture_stdout([&] { dispatcher.print_completions("prog", "fish"); });
+  check(fish.find("-a '--verbose'") != std::string::npos,
+        "fish completions offer the flag inherited by both branches");
+  check(fish.find("-a '--level'") != std::string::npos,
+        "fish completions offer the branch-local valued flag");
+  // "--verbose" is declared before the branch point, so it must be offered
+  // at more than one position: right after "device" and again after each of
+  // "info"/"reset".
+  std::size_t verbose_offers = 0;
+  for (std::size_t pos = fish.find("-a '--verbose'"); pos != std::string::npos;
+       pos = fish.find("-a '--verbose'", pos + 1)) {
+    ++verbose_offers;
+  }
+  check(verbose_offers >= 2,
+        "an inherited flag is offered at more than one position");
+}
+
 } // namespace
 
 int main() {
@@ -860,9 +1113,20 @@ int main() {
   test_empty_pattern_coexists();
   test_duplicate_command_rejected();
   test_arguments_are_positional();
+  test_presence_flag();
+  test_flag_aliases();
+  test_valued_flag_with_default();
+  test_valued_flag_without_default();
+  test_flag_inherited_across_branches();
+  test_flag_scoped_to_one_branch();
+  test_flag_missing_value_rejected();
+  test_presence_flag_rejects_inline_value();
+  test_flag_registration_validation();
   test_completions_reach_past_the_first_token();
   test_register_completions();
   test_register_completions_validates_shells();
+  test_flags_shown_in_usage_text();
+  test_flags_shown_in_completions();
 
   if (failures == 0) {
     std::println("all {} checks passed", checks);

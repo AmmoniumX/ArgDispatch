@@ -100,6 +100,42 @@ expected one of:
   device <name:string> increment <amount:int>
 ```
 
+## Flags
+
+`--flag`-style options are declared as a step in the builder chain, the same way patterns are,
+so they inherit through branching exactly like a shared prefix does: a flag declared *before* a
+branch point applies to every branch that follows it, while one declared only within a branch
+stays local to that branch.
+
+```cpp
+auto device = dispatcher.flag("--verbose")            // shared by every branch below
+    .literal("device")
+    .and_then<std::string_view>("name");
+
+device.literal("info").executes(device_info);         // void(bool, std::string_view)
+device.literal("increment")
+    .and_then<int>("amount")
+    .executes(device_increment);                       // void(bool, std::string_view, int)
+```
+
+Flags are matched by name wherever they appear on the command line, not by position, and they are
+not part of a pattern's shape. They are bound to the callable as leading parameters, in
+declaration order, ahead of the positional `and_then<>` arguments:
+
+- `.flag("--verbose")` (or `.flag({"--verbose", "-v"})` for aliases) is a **presence flag**:
+  bound as a plain `bool`, true if given, false otherwise.
+- `.flag<T>("--level")` is a **valued flag** with no default: bound as `std::optional<T>`,
+  `std::nullopt` if absent.
+- `.flag<T>("--level", 1)` is a valued flag **with a default**: bound as a plain `T`, using the
+  default when absent.
+
+Valued flags accept either `--level 3` or `--level=3`. A duplicate flag name within one chain
+(inherited or not) throws `std::logic_error` at declaration time, same as a duplicate pattern.
+
+Flags show up in `print_usage()` (`device <name> info [--verbose]`) and in all three
+`--completions` scripts, offered as candidates at every position they're valid — which, since a
+flag may appear anywhere in its command's line, can be more than one position for the same flag.
+
 ## Starting a chain
 
 The dispatcher starts an empty pattern, so it offers the same verbs a builder does. Which one you
@@ -314,6 +350,7 @@ tests/                 tests directory
 
 ## Not supported (currently)
 
-Named `--flag` arguments, optional/default arguments, subcommand nesting, variadic
-`std::vector<T>` slots, and reflecting a struct's members into argument slots. Default
-arguments would need an `.executes<^^gcd>()` form, since template deduction cannot see them.
+Optional/default *positional* arguments, subcommand nesting, variadic `std::vector<T>` slots,
+`--flag` clustering (`-vx`) or an explicit `--` end-of-flags marker, and reflecting a struct's
+members into argument slots. Default arguments would need an `.executes<^^gcd>()` form, since
+template deduction cannot see them.

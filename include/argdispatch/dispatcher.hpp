@@ -18,6 +18,7 @@
 #define ARGDISPATCH_DISPATCHER_HPP
 
 #include <algorithm>
+#include <any>
 #include <array>
 #include <cctype>
 #include <cstddef>
@@ -51,6 +52,39 @@ template <class... Ts> struct overloaded : Ts... {
 inline constexpr int exit_ok = 0;
 inline constexpr int exit_usage = 1; // nothing to run, or an unknown command
 inline constexpr int exit_args = 2;  // wrong shape, or an unparsable argument
+
+// Small compile-time helpers behind the flag machinery below.
+
+template <typename T> struct is_optional : std::false_type {};
+template <typename T> struct is_optional<std::optional<T>> : std::true_type {};
+template <typename T> inline constexpr bool is_optional_v = is_optional<T>::value;
+
+// The flat parameter-type tuple a callable must accept: every declared flag's
+// exposed type (bool for presence, T or std::optional<T> for valued), in
+// declaration order, followed by the positional and_then<> types.
+template <typename A, typename B>
+using TupleCatT = decltype(std::tuple_cat(std::declval<A>(), std::declval<B>()));
+
+// Appends one more exposed flag type to a Builder's FlagPack (a std::tuple<Fs...>
+// used purely as a compile-time type-list, never instantiated with real values).
+template <typename Pack, typename X> struct ConcatFlag;
+template <typename... Fs, typename X>
+struct ConcatFlag<std::tuple<Fs...>, X> {
+  using type = std::tuple<Fs..., X>;
+};
+template <typename Pack, typename X>
+using ConcatFlagT = typename ConcatFlag<Pack, X>::type;
+
+// is_invocable, but with the candidate argument types supplied as a tuple
+// instead of a parameter pack, for checking a generic lambda against a
+// Builder's flattened (flags + positional) expected-argument tuple.
+template <typename F, typename Tuple> struct is_invocable_with_tuple;
+template <typename F, typename... Args>
+struct is_invocable_with_tuple<F, std::tuple<Args...>>
+    : std::is_invocable<F, Args...> {};
+template <typename F, typename Tuple>
+inline constexpr bool is_invocable_with_tuple_v =
+    is_invocable_with_tuple<F, Tuple>::value;
 
 // One element of a command pattern: either a typed argument slot, or a
 // literal token (possibly with aliases, any of which may appear at that
@@ -92,6 +126,43 @@ struct Segment {
   }
   bool is_literal() const noexcept {
     return std::holds_alternative<Literal>(data);
+  }
+};
+
+// A declared `--flag`: matched by name anywhere in the token stream, not by
+// position, and not part of a pattern's shape (Segment/same_shape/collision
+// checks never see these). A Builder accumulates FlagSpecs the same way it
+// accumulates Segments, so a flag declared before a branch point is copied
+// into every branch's Route, while one declared only within a branch stays
+// local to it.
+struct FlagSpec {
+  enum class Kind { Presence, Valued };
+
+  // At least one name (e.g. {"--verbose", "-v"}); all are aliases.
+  std::vector<std::string> names;
+  Kind kind;
+
+  // Engaged only for a Valued flag declared with a default (flag<T>(names,
+  // default)); holds the exact T, so a default never has to round-trip
+  // through string formatting/parsing.
+  std::any default_value;
+
+  bool matches(std::string_view token) const {
+    for (const auto &name : names) {
+      if (name == token)
+        return true;
+    }
+    return false;
+  }
+
+  std::string display() const {
+    std::string result;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      if (i != 0)
+        result += '|';
+      result += names[i];
+    }
+    return result;
   }
 };
 
@@ -139,10 +210,13 @@ private:
     enum class Kind { User, Help, Version, Completions };
 
     std::vector<Segment> pattern;
+    std::vector<FlagSpec> flags;
     std::string usage;
     std::size_t literal_count;
     std::optional<std::string> description;
-    std::move_only_function<int(std::span<const std::string_view>) const>
+    std::move_only_function<int(std::span<const std::string_view>,
+                                std::span<const std::optional<std::string_view>>)
+                                const>
         invoke;
     Kind kind = Kind::User;
   };
@@ -196,23 +270,26 @@ public:
   //
   // Every method is const and returns a new builder, so one builder can be the
   // shared prefix of several commands.
-  template <typename... Ds> class Builder {
+  template <typename FlagPack, typename... Ds> class Builder {
     ArgDispatcher *dispatcher_;
     std::vector<Segment> pattern_;
+    std::vector<FlagSpec> flags_;
 
-    template <typename...> friend class Builder;
+    template <typename, typename...> friend class Builder;
 
   public:
-    Builder(ArgDispatcher *dispatcher, std::vector<Segment> pattern)
-        : dispatcher_(dispatcher), pattern_(std::move(pattern)) {}
+    Builder(ArgDispatcher *dispatcher, std::vector<Segment> pattern,
+            std::vector<FlagSpec> flags = {})
+        : dispatcher_(dispatcher), pattern_(std::move(pattern)),
+          flags_(std::move(flags)) {}
 
     // Declare the next positional argument. The label is used only in help text
     // and error messages; arguments are always matched by position.
     template <typename T>
-    Builder<Ds..., T> and_then(const char *label = nullptr) const {
+    Builder<FlagPack, Ds..., T> and_then(const char *label = nullptr) const {
       std::vector<Segment> next = pattern_;
       next.push_back(Segment{Segment::Argument{label != nullptr ? label : ""}});
-      return Builder<Ds..., T>(dispatcher_, std::move(next));
+      return Builder<FlagPack, Ds..., T>(dispatcher_, std::move(next), flags_);
     }
 
     // Require a literal token at this position. Used both to name a command and
@@ -239,7 +316,64 @@ public:
       }
       std::vector<Segment> next = pattern_;
       next.push_back(Segment{Segment::Literal{std::move(names_vec)}});
-      return Builder(dispatcher_, std::move(next));
+      return Builder(dispatcher_, std::move(next), flags_);
+    }
+
+    // Declare a presence flag: matched by name anywhere in the token stream
+    // (not by position), true if given, false otherwise. Bound to the
+    // callable as a plain `bool`. A flag declared here is inherited by every
+    // branch taken from this builder from here on; one declared only after a
+    // branch point stays local to that branch.
+    Builder<ConcatFlagT<FlagPack, bool>, Ds...> flag(std::string name) const {
+      return flag({std::move(name)});
+    }
+
+    // Same as above, but any of "names" may be used on the command line (e.g.
+    // {"--verbose", "-v"}); all are aliases for the same flag.
+    Builder<ConcatFlagT<FlagPack, bool>, Ds...>
+    flag(std::initializer_list<std::string> names) const {
+      std::vector<FlagSpec> next_flags = flags_;
+      next_flags.push_back(
+          make_flag_spec(names, FlagSpec::Kind::Presence, std::any{}));
+      return Builder<ConcatFlagT<FlagPack, bool>, Ds...>(
+          dispatcher_, pattern_, std::move(next_flags));
+    }
+
+    // Declare a valued flag (e.g. "--level 3" or "--level=3") with no
+    // default: absent on the command line, it is bound to the callable as
+    // std::nullopt.
+    template <typename T>
+    Builder<ConcatFlagT<FlagPack, std::optional<T>>, Ds...>
+    flag(std::string name) const {
+      return flag<T>({std::move(name)});
+    }
+
+    template <typename T>
+    Builder<ConcatFlagT<FlagPack, std::optional<T>>, Ds...>
+    flag(std::initializer_list<std::string> names) const {
+      std::vector<FlagSpec> next_flags = flags_;
+      next_flags.push_back(
+          make_flag_spec(names, FlagSpec::Kind::Valued, std::any{}));
+      return Builder<ConcatFlagT<FlagPack, std::optional<T>>, Ds...>(
+          dispatcher_, pattern_, std::move(next_flags));
+    }
+
+    // Same as above, but with a default value used when the flag is absent:
+    // bound to the callable as a plain `T`, never std::nullopt.
+    template <typename T>
+    Builder<ConcatFlagT<FlagPack, T>, Ds...> flag(std::string name,
+                                                   T default_value) const {
+      return flag<T>({std::move(name)}, std::move(default_value));
+    }
+
+    template <typename T>
+    Builder<ConcatFlagT<FlagPack, T>, Ds...>
+    flag(std::initializer_list<std::string> names, T default_value) const {
+      std::vector<FlagSpec> next_flags = flags_;
+      next_flags.push_back(make_flag_spec(names, FlagSpec::Kind::Valued,
+                                          std::any(std::move(default_value))));
+      return Builder<ConcatFlagT<FlagPack, T>, Ds...>(
+          dispatcher_, pattern_, std::move(next_flags));
     }
 
     // Bind the pattern to `f`. The parameter types are recovered by ordinary
@@ -274,6 +408,12 @@ public:
     }
 
   private:
+    // The flattened parameter-type tuple a callable must accept: every
+    // declared flag's exposed type first (in declaration order), then the
+    // positional and_then<> types. Identical to std::tuple<Ds...> when no
+    // flags were declared anywhere in the chain.
+    using ExpectedArgs = TupleCatT<FlagPack, std::tuple<Ds...>>;
+
     // Shared by both callable executes() overloads.
     template <typename F>
       requires std::is_class_v<F>
@@ -284,12 +424,12 @@ public:
         // operator(), so it gets exactly the same checking a plain function
         // gets: no silent int-to-double style conversions.
         static_assert(
-            std::tuple_size_v<callable_args_t<F>> == sizeof...(Ds),
+            std::tuple_size_v<callable_args_t<F>> == std::tuple_size_v<ExpectedArgs>,
             "and_then<> chain length does not match the callable's arity");
         static_assert(
-            std::is_same_v<std::tuple<Ds...>, callable_args_t<F>>,
+            std::is_same_v<ExpectedArgs, callable_args_t<F>>,
             "and_then<> types do not match the callable's parameter types");
-        if constexpr (std::is_same_v<std::tuple<Ds...>, callable_args_t<F>>) {
+        if constexpr (std::is_same_v<ExpectedArgs, callable_args_t<F>>) {
           bind(std::move(callable), std::move(description));
         }
       } else {
@@ -297,9 +437,9 @@ public:
         // parameters, so the chain is all we know; require only that the
         // callable accepts it.
         static_assert(
-            std::is_invocable_v<F &, Ds...>,
+            is_invocable_with_tuple_v<F &, ExpectedArgs>,
             "callable is not invocable with the and_then<> argument types");
-        if constexpr (std::is_invocable_v<F &, Ds...>) {
+        if constexpr (is_invocable_with_tuple_v<F &, ExpectedArgs>) {
           bind(std::move(callable), std::move(description));
         }
       }
@@ -312,18 +452,47 @@ public:
     void bind_function(R (*f)(Args...),
                        std::optional<std::string> description) const {
       static_assert(
-          sizeof...(Ds) == sizeof...(Args),
+          std::tuple_size_v<ExpectedArgs> == sizeof...(Args),
           "and_then<> chain length does not match the function's arity");
       static_assert(
-          std::is_same_v<std::tuple<Ds...>, std::tuple<Args...>>,
+          std::is_same_v<ExpectedArgs, std::tuple<Args...>>,
           "and_then<> types do not match the function's parameter types");
 
       // Guarded so that a mismatched chain reports the assertions above and
       // nothing else: instantiating the body too would bury them in cascading
       // conversion errors.
-      if constexpr (std::is_same_v<std::tuple<Ds...>, std::tuple<Args...>>) {
+      if constexpr (std::is_same_v<ExpectedArgs, std::tuple<Args...>>) {
         bind(f, std::move(description));
       }
+    }
+
+    // Validates "names" and checks for a name collision against every flag
+    // already in the chain (inherited or declared earlier on this same
+    // builder), then builds the spec. Collisions surface here, at
+    // registration time, rather than at dispatch.
+    FlagSpec make_flag_spec(std::initializer_list<std::string> names,
+                            FlagSpec::Kind kind,
+                            std::any default_value) const {
+      if (names.size() == 0) {
+        throw std::logic_error(
+            "argdispatch: flag() requires at least one name");
+      }
+      std::vector<std::string> names_vec(names);
+      for (const auto &name : names_vec) {
+        if (name.size() < 2 || name[0] != '-') {
+          throw std::logic_error(
+              "argdispatch: flag name '" + name + "' must start with '-'");
+        }
+      }
+      for (const auto &existing : flags_) {
+        for (const auto &name : names_vec) {
+          if (existing.matches(name)) {
+            throw std::logic_error("argdispatch: duplicate flag name '" +
+                                   name + "'");
+          }
+        }
+      }
+      return FlagSpec{std::move(names_vec), kind, std::move(default_value)};
     }
 
     // The argument labels, in declaration order, with a default for unlabelled
@@ -343,11 +512,59 @@ public:
       const std::array<const char *const, sizeof...(Ds)> types{
           type_name<Ds>...};
       const std::array<bool, sizeof...(Ds)> displays{display_type_name_v<Ds>...};
-      return build_usage_(types, displays, pattern_);
+      std::string usage = build_usage_(types, displays, pattern_);
+      std::string flags_usage = build_flags_usage();
+      if (!flags_usage.empty()) {
+        if (!usage.empty())
+          usage += ' ';
+        usage += flags_usage;
+      }
+      return usage;
+    }
+
+    // "[--verbose] [--level <int>]", one bracketed group per declared flag
+    // (inherited or not), in declaration order.
+    std::string build_flags_usage() const {
+      constexpr std::size_t flag_count = std::tuple_size_v<FlagPack>;
+      std::vector<std::string> parts(flag_count);
+      [&]<std::size_t... I>(std::index_sequence<I...>) {
+        ((parts[I] = flag_usage_part<I>()), ...);
+      }(std::make_index_sequence<flag_count>{});
+
+      std::string usage;
+      for (const auto &part : parts) {
+        if (!usage.empty())
+          usage += ' ';
+        usage += part;
+      }
+      return usage;
+    }
+
+    template <std::size_t I> std::string flag_usage_part() const {
+      using FlagT = std::tuple_element_t<I, FlagPack>;
+      const FlagSpec &spec = flags_[I];
+      if (spec.kind == FlagSpec::Kind::Presence) {
+        return std::format("[{}]", spec.display());
+      }
+      if constexpr (is_optional_v<FlagT>) {
+        using V = typename FlagT::value_type;
+        if constexpr (display_type_name_v<V>) {
+          return std::format("[{} <{}>]", spec.display(), type_name<V>);
+        } else {
+          return std::format("[{} <value>]", spec.display());
+        }
+      } else {
+        if constexpr (display_type_name_v<FlagT>) {
+          return std::format("[{} <{}>]", spec.display(), type_name<FlagT>);
+        } else {
+          return std::format("[{} <value>]", spec.display());
+        }
+      }
     }
 
     // Register the route, type-erasing `callable` behind a move_only_function
-    // that turns the matched argument tokens into typed values and invokes it.
+    // that turns the matched argument tokens (and flag tokens) into typed
+    // values and invokes it.
     template <typename F>
     void bind(F callable,
               std::optional<std::string> description = std::nullopt) const {
@@ -358,8 +575,9 @@ public:
       }
 
       dispatcher_->add_route(
-          Route{pattern_, build_usage(), literals, std::move(description),
-                make_invoker(std::move(callable), argument_labels())});
+          Route{pattern_, flags_, build_usage(), literals,
+                std::move(description),
+                make_invoker(std::move(callable), argument_labels(), flags_)});
     }
 
     // The call operator must stay const: Route::invoke is a const-qualified
@@ -370,21 +588,31 @@ public:
     template <typename F> struct Invoker {
       mutable F callable;
       std::vector<std::string> labels;
+      std::vector<FlagSpec> flag_specs;
 
-      int operator()(std::span<const std::string_view> args) const {
-        using R = std::invoke_result_t<F &, Ds...>;
+      static constexpr std::size_t flag_count = std::tuple_size_v<FlagPack>;
 
-        // Dispatch guarantees this, but a mismatch would be a memory error.
+      int operator()(std::span<const std::string_view> args,
+                    std::span<const std::optional<std::string_view>>
+                        flag_tokens) const {
+        // Dispatch guarantees both of these, but a mismatch would be a
+        // memory error.
         if (args.size() != sizeof...(Ds)) {
           std::println(stderr, "error: expected {} argument(s), got {}",
                        sizeof...(Ds), args.size());
           return exit_args;
         }
 
-        std::tuple<Ds...> values{};
+        ExpectedArgs values{};
         bool ok = true;
+
         [&]<std::size_t... I>(std::index_sequence<I...>) {
-          (void)((parse_into(args[I], std::get<I>(values))
+          (void)(fill_flag<I>(values, flag_tokens[I], flag_specs[I], ok) &&
+                 ...);
+        }(std::make_index_sequence<flag_count>{});
+
+        [&]<std::size_t... I>(std::index_sequence<I...>) {
+          (void)((parse_into(args[I], std::get<flag_count + I>(values))
                       ? true
                       : (std::println(
                              stderr,
@@ -396,6 +624,7 @@ public:
         if (!ok)
           return exit_args;
 
+        using R = decltype(std::apply(callable, values));
         if constexpr (std::is_void_v<R>) {
           std::apply(callable, values);
         } else if constexpr (std::formattable<R, char>) {
@@ -406,12 +635,71 @@ public:
         }
         return exit_ok;
       }
+
+    private:
+      // Converts one matched (or absent) flag token into its slot in
+      // "values", per the flag's declared Kind and exposed compile-time
+      // type. Kind is a runtime property (the same exposed `bool` covers
+      // both a Presence flag and a Valued<bool> flag with a default, for
+      // instance), so it is checked first; the exposed type then decides how
+      // an absent flag is handled.
+      template <std::size_t I>
+      static bool fill_flag(ExpectedArgs &values,
+                            const std::optional<std::string_view> &token,
+                            const FlagSpec &spec, bool &ok) {
+        using FlagT = std::tuple_element_t<I, ExpectedArgs>;
+        auto &slot = std::get<I>(values);
+
+        if (spec.kind == FlagSpec::Kind::Presence) {
+          if constexpr (std::is_same_v<FlagT, bool>) {
+            slot = token.has_value();
+          }
+          return true;
+        }
+
+        // Valued.
+        if constexpr (is_optional_v<FlagT>) {
+          if (token) {
+            typename FlagT::value_type parsed{};
+            if (!parse_into(*token, parsed)) {
+              std::println(stderr,
+                           "error: cannot parse '{}' for flag '{}', expected {}",
+                           *token, spec.display(),
+                           expected_of<typename FlagT::value_type>());
+              ok = false;
+              return false;
+            }
+            slot = std::move(parsed);
+          } else {
+            slot = std::nullopt;
+          }
+        } else if (token) {
+          if (!parse_into(*token, slot)) {
+            std::println(stderr,
+                         "error: cannot parse '{}' for flag '{}', expected {}",
+                         *token, spec.display(), expected_of<FlagT>());
+            ok = false;
+            return false;
+          }
+        } else {
+          // Has a mandatory default: only reachable via flag<T>(names,
+          // default), which always supplies one. Held as the exact T rather
+          // than a formatted-and-reparsed string, so it never has to round
+          // trip through parse_into.
+          slot = std::any_cast<FlagT>(spec.default_value);
+        }
+        return true;
+      }
     };
 
     template <typename F>
-    static std::move_only_function<int(std::span<const std::string_view>) const>
-    make_invoker(F callable, std::vector<std::string> labels) {
-      return Invoker<F>{std::move(callable), std::move(labels)};
+    static std::move_only_function<int(
+        std::span<const std::string_view>,
+        std::span<const std::optional<std::string_view>>) const>
+    make_invoker(F callable, std::vector<std::string> labels,
+                std::vector<FlagSpec> flags) {
+      return Invoker<F>{std::move(callable), std::move(labels),
+                        std::move(flags)};
     }
   };
 
@@ -423,19 +711,20 @@ public:
   //   dispatcher.executes(f)                             ./program
 
   // Begin a command with a leading literal.
-  Builder<> literal(std::string name) {
+  Builder<std::tuple<>> literal(std::string name) {
     return root().literal(std::move(name));
   }
 
   // Same as above, but any of "names" may appear as the leading token: they
   // are aliases for the same command.
-  Builder<> literal(std::initializer_list<std::string> names) {
+  Builder<std::tuple<>> literal(std::initializer_list<std::string> names) {
     return root().literal(names);
   }
 
   // Begin a command whose first token is an argument. Mutually exclusive with
   // literal-led commands.
-  template <typename T> Builder<T> and_then(const char *label = nullptr) {
+  template <typename T>
+  Builder<std::tuple<>, T> and_then(const char *label = nullptr) {
     return root().and_then<T>(label);
   }
 
@@ -443,6 +732,41 @@ public:
   template <typename F> void executes(F &&callable) {
     root().executes(std::forward<F>(callable));
   }
+
+  // Begin a chain with a flag declared before anything else, so it applies to
+  // every command later branched from it (see Builder::flag()).
+  Builder<std::tuple<bool>> flag(std::string name) {
+    return root().flag(std::move(name));
+  }
+
+  Builder<std::tuple<bool>> flag(std::initializer_list<std::string> names) {
+    return root().flag(names);
+  }
+
+  template <typename T> Builder<std::tuple<std::optional<T>>> flag(std::string name) {
+    return root().template flag<T>(std::move(name));
+  }
+
+  template <typename T>
+  Builder<std::tuple<std::optional<T>>>
+  flag(std::initializer_list<std::string> names) {
+    return root().template flag<T>(names);
+  }
+
+  template <typename T>
+  Builder<std::tuple<T>> flag(std::string name, T default_value) {
+    return root().template flag<T>(std::move(name), std::move(default_value));
+  }
+
+  template <typename T>
+  Builder<std::tuple<T>> flag(std::initializer_list<std::string> names,
+                              T default_value) {
+    return root().template flag<T>(names, std::move(default_value));
+  }
+  // (root()'s return type is fixed, not dependent on this T, so the
+  // ".template" above is technically redundant, but harmless and keeps every
+  // flag<T>(...) call site uniform whether or not it happens to sit inside a
+  // template.)
 
   // Called once after all commands have been registered, to add the built-in
   // "--help" and "--version" commands
@@ -506,13 +830,23 @@ public:
         std::ranges::to<std::vector>();
 
     // Most literals wins, so a tagged branch beats a plainer pattern of the
-    // same length. Registration order breaks ties.
+    // same length. Registration order breaks ties. Each route only ever
+    // recognises its own declared flags (inherited or not), so this strips
+    // those out per-candidate before the existing positional match runs on
+    // what remains.
     const Route *best = nullptr;
+    std::vector<std::string_view> best_remaining;
+    std::vector<std::optional<std::string_view>> best_flag_tokens;
     for (const auto &route : routes_) {
-      if (!matches(route, tokens))
+      auto stripped = strip_flags(route.flags, tokens);
+      if (!stripped)
+        continue;
+      if (!matches(route, stripped->remaining))
         continue;
       if (best == nullptr || route.literal_count > best->literal_count) {
         best = &route;
+        best_remaining = std::move(stripped->remaining);
+        best_flag_tokens = std::move(stripped->flag_tokens);
       }
     }
     if (best != nullptr) {
@@ -527,7 +861,8 @@ public:
         print_completions(program, tokens[1]);
         return exit_ok;
       case Route::Kind::User:
-        return best->invoke(arguments_of(*best, tokens));
+        return best->invoke(arguments_of(*best, best_remaining),
+                            best_flag_tokens);
       }
     }
 
@@ -699,7 +1034,7 @@ public:
         return *this;
     }
     std::string usage = build_usage_({}, {}, pattern);
-    routes_.push_back(Route{std::move(pattern), std::move(usage),
+    routes_.push_back(Route{std::move(pattern), /*flags=*/{}, std::move(usage),
                             /*literal_count=*/2, std::move(description),
                             /*invoke=*/nullptr, Route::Kind::Completions});
     return *this;
@@ -711,7 +1046,9 @@ public:
   }
 
 private:
-  Builder<> root() { return Builder<>(this, std::vector<Segment>{}); }
+  Builder<std::tuple<>> root() {
+    return Builder<std::tuple<>>(this, std::vector<Segment>{});
+  }
 
   // Registers "--help" and "--version" as ordinary routes, each a single
   // literal segment with no arguments, unless a route with that same shape
@@ -734,7 +1071,7 @@ private:
         return;
     }
     std::string usage = build_usage_({}, {}, pattern);
-    routes_.push_back(Route{std::move(pattern), std::move(usage),
+    routes_.push_back(Route{std::move(pattern), /*flags=*/{}, std::move(usage),
                             /*literal_count=*/1, std::move(description),
                             /*invoke=*/nullptr, kind});
   }
@@ -779,10 +1116,31 @@ private:
   // One position in the space of possible command lines: the literal
   // alternatives valid there (if any), and, separately, whether some
   // registered pattern also accepts an arbitrary token there instead.
+  // "flag_names" are the names of every flag valid *anywhere* in the span of
+  // some route passing through this node — flags aren't positional, so
+  // unlike literal_edges/argument_child they never gate which node comes
+  // next; they're just additional words a completer may offer once it has
+  // located this node.
   struct CompletionNode {
     std::vector<CompletionEdge> literal_edges;
     std::optional<std::size_t> argument_child;
+    std::vector<std::string> flag_names;
   };
+
+  // Adds "flags"' names into "node.flag_names", deduplicated. Flags declared
+  // anywhere in a route's chain are valid anywhere in that route's token
+  // span (see strip_flags()), so this is called for every node a route's
+  // pattern passes through, not just the node where a flag happened to be
+  // declared.
+  static void merge_flag_names(CompletionNode &node,
+                               const std::vector<FlagSpec> &flags) {
+    for (const auto &spec : flags) {
+      for (const auto &name : spec.names) {
+        if (std::ranges::find(node.flag_names, name) == node.flag_names.end())
+          node.flag_names.push_back(name);
+      }
+    }
+  }
 
   // Builds a trie over every registered pattern: a literal segment becomes
   // one edge per alias (all sharing one child), an argument segment becomes
@@ -795,6 +1153,7 @@ private:
     std::vector<CompletionNode> nodes(1);
     for (const auto &route : routes_) {
       std::size_t node = 0;
+      merge_flag_names(nodes[node], route.flags);
       for (const auto &segment : route.pattern) {
         if (segment.is_literal()) {
           const auto &literal = std::get<Segment::Literal>(segment.data);
@@ -829,6 +1188,7 @@ private:
           }
           node = *nodes[node].argument_child;
         }
+        merge_flag_names(nodes[node], route.flags);
       }
     }
     return nodes;
@@ -846,6 +1206,9 @@ private:
     for (const auto &edge : node.literal_edges) {
       for (const auto &name : edge.names)
         candidates.push_back({name, edge.description});
+    }
+    for (const auto &name : node.flag_names) {
+      candidates.push_back({name, std::nullopt});
     }
     std::ranges::sort(candidates, {}, &CompletionCandidate::name);
     candidates.erase(
@@ -980,7 +1343,7 @@ private:
     std::string prefix = "_argdispatch_" + sanitize_identifier(name);
     auto edges = flatten_completion_edges(nodes);
 
-    std::string parents, names_arr, children, arg_pairs;
+    std::string parents, names_arr, children, arg_pairs, flag_pairs;
     for (std::size_t i = 0; i < edges.parent.size(); ++i) {
       if (!parents.empty())
         parents += ' ';
@@ -997,12 +1360,22 @@ private:
         arg_pairs += std::format("[{}]={} ", node_idx,
                                  *nodes[node_idx].argument_child);
       }
+      if (!nodes[node_idx].flag_names.empty()) {
+        flag_pairs += std::format(
+            "[{}]={} ", node_idx,
+            shell_quote(joined(nodes[node_idx].flag_names)));
+      }
     }
 
+    // "flag_child" holds words valid at "node" regardless of how it was
+    // reached, alongside (never instead of) whatever literal words the edge
+    // walk already offers there — flags aren't tied to a position, so they
+    // never gate the walk itself, only what gets offered once it stops.
     std::string script = R"BASH(@PREFIX@_edge_parent=(@PARENTS@)
 @PREFIX@_edge_names=(@NAMES@)
 @PREFIX@_edge_child=(@CHILDREN@)
 declare -A @PREFIX@_arg_child=(@ARGPAIRS@)
+declare -A @PREFIX@_node_flags=(@FLAGPAIRS@)
 
 @PREFIX@_complete() {
   local cur=${COMP_WORDS[COMP_CWORD]}
@@ -1035,6 +1408,9 @@ declare -A @PREFIX@_arg_child=(@ARGPAIRS@)
       words+=(${@PREFIX@_edge_names[$e]})
     fi
   done
+  if [[ -n "${@PREFIX@_node_flags[$node]+x}" ]]; then
+    words+=(${@PREFIX@_node_flags[$node]})
+  fi
   if [[ ${#words[@]} -gt 0 ]]; then
     COMPREPLY+=($(compgen -W "${words[*]}" -- "$cur"))
   fi
@@ -1050,6 +1426,7 @@ complete -F @PREFIX@_complete @QNAME@
     replace_all(script, "@PARENTS@", parents);
     replace_all(script, "@CHILDREN@", children);
     replace_all(script, "@ARGPAIRS@", arg_pairs);
+    replace_all(script, "@FLAGPAIRS@", flag_pairs);
     replace_all(script, "@QNAME@", shell_quote(name));
     std::print("{}", script);
   }
@@ -1064,7 +1441,8 @@ complete -F @PREFIX@_complete @QNAME@
     std::string prefix = "_argdispatch_" + sanitize_identifier(name);
     auto edges = flatten_completion_edges(nodes);
 
-    std::string parent_pairs, names_pairs, desc_pairs, child_pairs, arg_pairs;
+    std::string parent_pairs, names_pairs, desc_pairs, child_pairs, arg_pairs,
+        flag_pairs;
     for (std::size_t i = 0; i < edges.parent.size(); ++i) {
       parent_pairs += std::format("[{}]={} ", i, edges.parent[i]);
       names_pairs += std::format("[{}]={} ", i, shell_quote(edges.names[i]));
@@ -1079,18 +1457,28 @@ complete -F @PREFIX@_complete @QNAME@
         arg_pairs += std::format("[{}]={} ", node_idx,
                                  *nodes[node_idx].argument_child);
       }
+      if (!nodes[node_idx].flag_names.empty()) {
+        flag_pairs += std::format(
+            "[{}]={} ", node_idx,
+            shell_quote(joined(nodes[node_idx].flag_names)));
+      }
     }
 
+    // "node_flags" holds words valid at "node" regardless of how it was
+    // reached, alongside (never instead of) whatever literal words the edge
+    // walk already offers there — flags aren't tied to a position, so they
+    // never gate the walk itself, only what gets offered once it stops.
     std::string script = R"ZSH(#compdef @NAME@
 
 typeset -gA @PREFIX@_edge_parent @PREFIX@_edge_names @PREFIX@_edge_desc
-typeset -gA @PREFIX@_edge_child @PREFIX@_arg_child
+typeset -gA @PREFIX@_edge_child @PREFIX@_arg_child @PREFIX@_node_flags
 
 @PREFIX@_edge_parent=(@PARENTPAIRS@)
 @PREFIX@_edge_names=(@NAMEPAIRS@)
 @PREFIX@_edge_desc=(@DESCPAIRS@)
 @PREFIX@_edge_child=(@CHILDPAIRS@)
 @PREFIX@_arg_child=(@ARGPAIRS@)
+@PREFIX@_node_flags=(@FLAGPAIRS@)
 
 @PREFIX@_complete() {
   local node=0 i tok found e n
@@ -1136,6 +1524,12 @@ typeset -gA @PREFIX@_edge_child @PREFIX@_arg_child
       done
     fi
   done
+  if [[ -n "${@PREFIX@_node_flags[$node]+x}" ]]; then
+    for n in ${=@PREFIX@_node_flags[$node]}; do
+      words_out+=("$n")
+      descs+=("$n")
+    done
+  fi
   if [[ ${#words_out[@]} -gt 0 ]]; then
     compadd -d descs -a words_out
   fi
@@ -1152,9 +1546,23 @@ compdef @PREFIX@_complete @QNAME@
     replace_all(script, "@DESCPAIRS@", desc_pairs);
     replace_all(script, "@CHILDPAIRS@", child_pairs);
     replace_all(script, "@ARGPAIRS@", arg_pairs);
+    replace_all(script, "@FLAGPAIRS@", flag_pairs);
     replace_all(script, "@NAME@", name);
     replace_all(script, "@QNAME@", shell_quote(name));
     std::print("{}", script);
+  }
+
+  // Space-joins "words", for embedding a whole node's flag names as one
+  // shell-array-element string (later split again by the shell itself, e.g.
+  // bash's unquoted "${...}" expansion or zsh's "${=...}").
+  static std::string joined(const std::vector<std::string> &words) {
+    std::string result;
+    for (const auto &word : words) {
+      if (!result.empty())
+        result += ' ';
+      result += word;
+    }
+    return result;
   }
 
   // Wraps "text" in single quotes for safe embedding in a generated shell
@@ -1178,6 +1586,68 @@ compdef @PREFIX@_complete @QNAME@
         return true;
     }
     return false;
+  }
+
+  // The result of pulling a route's own declared flags out of a raw token
+  // list: what's left for the ordinary positional match, plus one matched
+  // value (or nullopt) per entry of "flags", in declaration order.
+  struct FlagStripResult {
+    std::vector<std::string_view> remaining;
+    std::vector<std::optional<std::string_view>> flag_tokens;
+  };
+
+  // Recognises only "flags"' own names (never guesses from a token's shape,
+  // e.g. a leading '-'), so a route with no flags declared leaves every token
+  // untouched and a token matching no name here is left in "remaining" for
+  // positional matching to accept or reject on its own. Supports both
+  // "--flag value" and "--flag=value" for a Valued flag; a presence flag
+  // takes no value and rejects the "=value" form by failing the whole route
+  // (returning nullopt), since that combination cannot be this route's flag.
+  static std::optional<FlagStripResult>
+  strip_flags(const std::vector<FlagSpec> &flags,
+             std::span<const std::string_view> tokens) {
+    FlagStripResult result;
+    result.flag_tokens.resize(flags.size());
+
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+      std::string_view token = tokens[i];
+      std::string_view head = token;
+      std::optional<std::string_view> inline_value;
+      if (auto eq = token.find('='); eq != std::string_view::npos) {
+        head = token.substr(0, eq);
+        inline_value = token.substr(eq + 1);
+      }
+
+      std::optional<std::size_t> matched;
+      for (std::size_t f = 0; f < flags.size(); ++f) {
+        if (flags[f].matches(head)) {
+          matched = f;
+          break;
+        }
+      }
+
+      if (!matched) {
+        result.remaining.push_back(token);
+        continue;
+      }
+
+      const FlagSpec &spec = flags[*matched];
+      if (spec.kind == FlagSpec::Kind::Presence) {
+        if (inline_value)
+          return std::nullopt;
+        result.flag_tokens[*matched] = head;
+      } else {
+        if (inline_value) {
+          result.flag_tokens[*matched] = *inline_value;
+        } else {
+          if (i + 1 >= tokens.size())
+            return std::nullopt;
+          result.flag_tokens[*matched] = tokens[i + 1];
+          ++i;
+        }
+      }
+    }
+    return result;
   }
 
   static bool matches(const Route &route,

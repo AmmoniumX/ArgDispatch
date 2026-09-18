@@ -1,3 +1,4 @@
+#include <optional>
 #include <print>
 #include <stdexcept>
 #include <string_view>
@@ -21,8 +22,10 @@ void greet(std::string_view name, int times, bool loud) {
   }
 }
 
-void device_info(std::string_view name) {
+void device_info(bool verbose, std::string_view name) {
   std::println("device {}: up, 3 ports", name);
+  if (verbose)
+    std::println("  (verbose: link speed 1000Mb/s, MTU 1500)");
 }
 
 enum class Status { up, down };
@@ -38,12 +41,19 @@ inline constexpr const char *status_to_str(Status e) {
   }
 }
 
-void device_set_status(std::string_view name, Status status) {
+void device_set_status(bool verbose, std::string_view name, Status status) {
   std::println("device {} status changed: {}", name, status_to_str(status));
+  if (verbose)
+    std::println("  (verbose: change applied immediately)");
 }
 
 void run(Mode mode, int n) {
   std::println("running mode={} n={}", argdispatch::enum_name(mode), n);
+}
+
+void serve(std::optional<int> port, int workers) {
+  std::println("serving on port {} with {} worker(s)", port.value_or(8080),
+               workers);
 }
 
 int main(int argc, char **argv) {
@@ -104,7 +114,14 @@ int main(int argc, char **argv) {
   // and fanned out with literal() - here `device <name>` is common to both:
   //   ./demo device eth0 info
   //   ./demo device eth0 increment 5
-  auto device = dispatcher.literal({"device", "dev"})
+  //
+  // flag() works the same way: declared here, before the branch, --verbose
+  // is inherited by every device subcommand below and always binds as the
+  // *first* callable parameter, ahead of the positional and_then<> chain.
+  //   ./demo --verbose device eth0 info
+  //   ./demo device eth0 info -v            (an alias; either position works)
+  auto device = dispatcher.flag({"--verbose", "-v"})
+    .literal({"device", "dev"})
     .and_then<std::string_view>("name");
 
   device.literal("info")
@@ -122,13 +139,27 @@ int main(int argc, char **argv) {
 
   device.literal({"enable", "on", "up"})
     .executes(
-      [](auto name) { return device_set_status(name, Status::up); },
+      [](bool verbose, auto name) {
+        return device_set_status(verbose, name, Status::up);
+      },
       "enables the device"
     );
+
+  // A flag declared only on one branch stays local to it: --force here has no
+  // effect on "enable" or any other device subcommand, only "disable". Since
+  // --verbose was declared earlier (on the shared "device" prefix) and
+  // --force only here, the callable sees flags in that declaration order:
+  // (verbose, force, name), flags first, then the positional chain.
+  //   ./demo device eth0 disable --force
   device.literal({"disable", "off", "down"})
+    .flag("--force")
     .executes(
-      [](auto name) { return device_set_status(name, Status::down); },
-      "disables the device"
+      [](bool verbose, bool force, std::string_view name) {
+        if (force)
+          std::println("(forced)");
+        return device_set_status(verbose, name, Status::down);
+      },
+      "disables the device, optionally forcing it with --force"
     );
 
   // Branching does not need an extra literal: the same name with different
@@ -146,6 +177,20 @@ int main(int argc, char **argv) {
     .executes(
       [](std::string_view name) { std::println("{} nominal", name); },
       "logs the status of a single device"
+    );
+
+  // Valued flags: --port has no default, so it binds as std::optional<int>
+  // (nullopt if omitted); --workers has one, so it binds as a plain int and
+  // falls back to 4 when omitted. Both accept "--flag value" or
+  // "--flag=value".
+  //   ./demo serve
+  //   ./demo serve --port 9000 --workers=8
+  dispatcher.flag<int>("--port")
+    .flag<int>("--workers", 4)
+    .literal("serve")
+    .executes(
+      serve,
+      "serves on a port (default 8080) with a worker count (default 4)"
     );
   // clang-format on
 
